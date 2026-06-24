@@ -561,17 +561,31 @@ function pillSwitch(on) {
 
 // Mobile "Guide options" bottom sheet — folds the header's toggle cluster into
 // one labeled, self-explanatory panel (no hover tooltips on touch).
+let guideSheetShown = false; // true once the open animation has played (don't replay it on re-render)
 function guideOptionsSheet() {
-  if (!state.guideOptionsOpen) return null;
-  const close = () => set({ guideOptionsOpen: false });
+  if (!state.guideOptionsOpen) { guideSheetShown = false; return null; }
+  const first = !guideSheetShown; // only animate in on the first frame, not on every toggle re-render
+  guideSheetShown = true;
+  // Animate OUT before unmounting: the full re-render model would otherwise just
+  // drop the node. Slide the existing element down + fade the scrim, then commit.
+  const close = () => {
+    const scrim = document.querySelector(".aer-sheet-scrim");
+    const sheet = document.querySelector(".aer-sheet");
+    if (!sheet) { set({ guideOptionsOpen: false }); return; }
+    sheet.style.animation = "none";
+    sheet.style.transition = "transform .24s cubic-bezier(.3,.7,.3,1)";
+    sheet.style.transform = "translateY(100%)";
+    if (scrim) { scrim.style.transition = "opacity .22s ease"; scrim.style.opacity = "0"; }
+    setTimeout(() => set({ guideOptionsOpen: false }), 215);
+  };
   const divider = () => h("div", { style: "height:1px;background:rgba(255,255,255,0.06)" });
   const labelBlock = (label, desc) => h("div", { style: "flex:1;min-width:0" },
     h("div", { style: "font-size:14.5px;font-weight:600;color:#e6e9ec" }, label),
     h("div", { style: "font-size:12px;color:#7e858c;margin-top:2px;line-height:1.35" }, desc));
   const segRow = (label, desc, control) => h("div", { style: "display:flex;align-items:center;gap:12px;padding:13px 2px" }, labelBlock(label, desc), control);
   const toggleRow = (label, desc, on, onClick) => h("div", { onClick, style: "display:flex;align-items:center;gap:12px;padding:13px 2px;cursor:pointer" }, labelBlock(label, desc), pillSwitch(on));
-  return h("div", { style: "position:fixed;inset:0;z-index:55;background:rgba(6,7,8,0.62);backdrop-filter:blur(3px);display:flex;flex-direction:column;justify-content:flex-end;animation:aerViewIn .16s ease", onClick: close },
-    h("div", { class: "aer-sheet", style: "background:#141619;border-top-left-radius:18px;border-top-right-radius:18px;border-top:1px solid rgba(255,255,255,0.1);box-shadow:0 -20px 60px rgba(0,0,0,0.6);padding:6px 18px 16px;animation:aerSheetUp .24s cubic-bezier(.2,.8,.3,1)", onClick: (e) => e.stopPropagation() },
+  return h("div", { class: "aer-sheet-scrim", style: "position:fixed;inset:0;z-index:55;background:rgba(6,7,8,0.62);backdrop-filter:blur(3px);display:flex;flex-direction:column;justify-content:flex-end;" + (first ? "animation:aerViewIn .16s ease;" : ""), onClick: close },
+    h("div", { class: "aer-sheet", style: "background:#141619;border-top-left-radius:18px;border-top-right-radius:18px;border-top:1px solid rgba(255,255,255,0.1);box-shadow:0 -20px 60px rgba(0,0,0,0.6);padding:6px 18px calc(16px + env(safe-area-inset-bottom, 0px));" + (first ? "animation:aerSheetUp .24s cubic-bezier(.2,.8,.3,1);" : ""), onClick: (e) => e.stopPropagation() },
       h("div", { style: "display:flex;justify-content:center;padding:8px 0 4px" }, h("div", { style: "width:38px;height:4px;border-radius:2px;background:rgba(255,255,255,0.22)" })),
       h("div", { style: "display:flex;align-items:center;justify-content:space-between;margin:2px 0 4px" },
         h("div", { style: "font-size:16px;font-weight:700" }, "Guide options"),
