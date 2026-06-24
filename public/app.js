@@ -2154,7 +2154,63 @@ function destroyMpegts() {
   }
 }
 
+// ── Fullscreen chrome auto-hide ──
+// The title bar (name / now-playing / surf chevrons / close) fades away on
+// inactivity just like the native player controls, and reappears on any pointer,
+// touch, or key activity. Kept visible while paused (mirrors native controls).
+const PLAYER_IDLE_MS = 2800;
+let playerIdleTimer = null;
+let playerActivityHandler = null;
+function showPlayerChrome() {
+  const ms = morphState;
+  if (!ms) return;
+  // Only touch the DOM on the hidden→shown transition; idle activity otherwise
+  // just restarts the countdown (mousemove fires a lot).
+  if (ms.chromeHidden !== false) {
+    ms.chromeHidden = false;
+    ms.chrome.style.visibility = "";
+    ms.chrome.style.opacity = "1";
+    document.body.style.cursor = "";
+  }
+  if (playerIdleTimer) clearTimeout(playerIdleTimer);
+  playerIdleTimer = setTimeout(hidePlayerChrome, PLAYER_IDLE_MS);
+}
+function hidePlayerChrome() {
+  const ms = morphState;
+  if (!ms) return;
+  // Don't hide while paused — like native controls, keep them up. Re-check later.
+  if (ms.video && ms.video.paused) {
+    if (playerIdleTimer) clearTimeout(playerIdleTimer);
+    playerIdleTimer = setTimeout(hidePlayerChrome, PLAYER_IDLE_MS);
+    return;
+  }
+  ms.chromeHidden = true;
+  ms.chrome.style.opacity = "0";
+  document.body.style.cursor = "none";
+  // Once faded, drop it from hit-testing so the invisible buttons aren't clickable.
+  setTimeout(() => { if (morphState === ms && ms.chromeHidden) ms.chrome.style.visibility = "hidden"; }, 280);
+}
+function armPlayerAutohide() {
+  if (playerActivityHandler) return; // already armed (e.g. channel surf)
+  playerActivityHandler = () => showPlayerChrome();
+  document.addEventListener("mousemove", playerActivityHandler);
+  document.addEventListener("touchstart", playerActivityHandler, { passive: true });
+  document.addEventListener("keydown", playerActivityHandler);
+  showPlayerChrome(); // reveal now, start the idle countdown
+}
+function disarmPlayerAutohide() {
+  if (playerIdleTimer) { clearTimeout(playerIdleTimer); playerIdleTimer = null; }
+  if (playerActivityHandler) {
+    document.removeEventListener("mousemove", playerActivityHandler);
+    document.removeEventListener("touchstart", playerActivityHandler);
+    document.removeEventListener("keydown", playerActivityHandler);
+    playerActivityHandler = null;
+  }
+  document.body.style.cursor = "";
+}
+
 function closePlayer() {
+  disarmPlayerAutohide();
   if (!playerEl || !morphState) { if (playerEl) { playerEl.remove(); playerEl = null; } return; }
   const ms = morphState;
   const channelId = playerChannelId;
@@ -2311,7 +2367,7 @@ function openPlayer(channelId) {
     morphState.chrome.replaceWith(fresh);
     morphState.chrome = fresh;
     void fresh.offsetWidth;
-    fresh.style.opacity = "1";
+    showPlayerChrome(); // reveal the new chrome and restart the idle countdown
     return;
   }
 
@@ -2370,7 +2426,7 @@ function openPlayer(channelId) {
       morph.style.transition = MORPH_BOX_TRANSITION;
       setMorphRect(morph, { left: 0, top: 0, width: innerWidth, height: innerHeight });
     }
-    chrome.style.opacity = "1";
+    armPlayerAutohide(); // fade-in chrome, then auto-hide it with the controls on idle
     setTimeout(() => { if (playerEl === wrapper) video.controls = true; }, canFlip ? 440 : 0);
   }, 300);
 }
