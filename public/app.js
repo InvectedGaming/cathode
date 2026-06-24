@@ -649,19 +649,13 @@ function guideScreen() {
   const frost = ambient ? ";backdrop-filter:blur(18px);-webkit-backdrop-filter:blur(18px)" : "";
   const scrollerAmbientBg = mob ? "rgba(8,9,11,0.76)" : "rgba(11,12,15,0.3)";
 
-  // header
-  const header = h("div", { style: "flex:none;display:flex;align-items:flex-end;justify-content:space-between;flex-wrap:wrap;gap:10px;padding:" + (mob ? "14px 14px 10px" : "18px 24px 14px") + (ambient ? ";position:relative;z-index:2" : "") },
-    h("div", null,
-      h("div", { style: "font-size:23px;font-weight:700;letter-spacing:-.01em" + (ambient ? ";" + "text-shadow:0 2px 8px rgba(0,0,0,0.7)" : "") }, "Guide"),
-      h("div", { style: "font-size:13px;color:#9aa0a6;margin-top:3px" }, state.guideOnlyWithEpg !== false
-        ? `${visible.length} channels with guide · ${totalVisible} total · ${new Date(now).toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" })}`
-        : `Live across ${visible.length} channels · ${new Date(now).toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" })}`)),
-    (() => {
+  // Controls row (Options/Jump on phones; the full toggle cluster on desktop).
+  const controls = (() => {
       const jumpBtn = h("button", { style: "height:36px;padding:0 15px;border-radius:9px;border:1px solid rgba(255,255,255,0.1);background:rgba(255,255,255,0.04);color:#dfe3e7;font-size:13px;font-weight:600;display:flex;align-items:center;gap:7px;cursor:pointer", onClick: () => { guideScrollLeft = null; render(); } },
         h("span", { style: "width:7px;height:7px;border-radius:50%;background:#54b6ff;box-shadow:0 0 8px #54b6ff" }), "Jump to now");
       if (mob) {
         // Phones: fold the toggle cluster into a single labeled Options sheet.
-        return h("div", { style: "display:flex;gap:8px;align-items:center;flex-wrap:wrap;justify-content:flex-end" },
+        return h("div", { style: "display:flex;gap:8px;align-items:center;flex-wrap:wrap" },
           h("button", { onClick: () => set({ guideOptionsOpen: true }), style: "height:36px;padding:0 14px;border-radius:9px;border:1px solid rgba(255,255,255,0.12);background:rgba(255,255,255,0.05);color:#dfe3e7;font-size:13px;font-weight:600;display:flex;align-items:center;gap:8px;cursor:pointer" },
             icon("sliders-horizontal", 15, 0.8), "Options"),
           jumpBtn);
@@ -676,7 +670,18 @@ function guideScreen() {
         densityToggle(),
         jumpBtn,
         h("button", { style: "height:36px;padding:0 15px;border-radius:9px;border:1px solid rgba(255,255,255,0.1);background:rgba(255,255,255,0.04);color:#dfe3e7;font-size:13px;font-weight:600;cursor:pointer" }, "All genres"));
-    })());
+    })();
+  // On phones the "Guide" title + lineup stats are dropped to reclaim vertical
+  // space (the stats live in Settings instead); only the controls remain.
+  const header = mob
+    ? h("div", { style: "flex:none;display:flex;align-items:center;gap:8px;padding:8px 12px" + (ambient ? ";position:relative;z-index:2" : "") }, controls)
+    : h("div", { style: "flex:none;display:flex;align-items:flex-end;justify-content:space-between;flex-wrap:wrap;gap:10px;padding:18px 24px 14px" + (ambient ? ";position:relative;z-index:2" : "") },
+        h("div", null,
+          h("div", { style: "font-size:23px;font-weight:700;letter-spacing:-.01em" + (ambient ? ";text-shadow:0 2px 8px rgba(0,0,0,0.7)" : "") }, "Guide"),
+          h("div", { style: "font-size:13px;color:#9aa0a6;margin-top:3px" }, state.guideOnlyWithEpg !== false
+            ? `${visible.length} channels with guide · ${totalVisible} total · ${new Date(now).toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" })}`
+            : `Live across ${visible.length} channels · ${new Date(now).toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" })}`)),
+        controls);
 
   // rich detail pane (reflects the selected/highlighted program). On phones it
   // auto-hides after a short idle. In ambient mode we KEEP the card's space (fade
@@ -1323,12 +1328,24 @@ function settingsScreen() {
   const s = state.settings;
   const dvrOn = !!s["features.dvr"];
   const tsOn = !!s["features.timeshift"];
+  // Lineup stats (moved here from the guide header).
+  const chans = (state.data && state.data.channels) || [];
+  const totalCh = chans.filter((c) => !c.isHidden).length;
+  const guideData = (state.data && state.data.guide) || {};
+  const withGuide = chans.filter((c) => !c.isHidden && guideData[c.id] && guideData[c.id].length).length;
+  const statBlock = (n, label) => h("div", null,
+    h("div", { style: "font-size:20px;font-weight:700;font-family:'JetBrains Mono',monospace;color:#e6e9ec" }, n.toLocaleString()),
+    h("div", { style: "font-size:12px;color:#7e858c;margin-top:1px" }, label));
   return h("div", { style: "flex:1;display:flex;flex-direction:column;min-height:0" },
     h("div", { style: "flex:none;padding:18px 24px 14px" },
       h("div", { style: "font-size:23px;font-weight:700;letter-spacing:-.01em" }, "Settings"),
       h("div", { style: "font-size:13px;color:#7e858c;margin-top:3px" }, "Enable only what you need — heavy features are off by default")),
     h("div", { style: "flex:1;min-height:0;overflow:auto;padding:0 24px 24px" },
       h("div", { style: "max-width:760px" },
+        settingsSection("LIBRARY",
+          h("div", { style: "padding:15px 16px;display:flex;gap:32px;flex-wrap:wrap" },
+            statBlock(totalCh, "channels"),
+            statBlock(withGuide, "with guide data"))),
         settingsSection("FEATURES",
           settingRow({ title: "HDHomeRun tuner", desc: "Expose Phospharr as a tuner for Plex / Emby / Jellyfin.", key: "features.hdhr", type: "toggle" }),
           settingRow({ title: "Browser audio transcode", desc: "Convert AC-3 → AAC so those channels play in-browser (needs ffmpeg).", key: "features.transcode", type: "toggle" }),
