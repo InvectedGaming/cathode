@@ -3,7 +3,7 @@ import { db, sqlite } from "../db/index.ts";
 import { channels, programs, providers } from "../db/schema.ts";
 import { fetchXmltvStream, streamXmltv, type XmltvProgramme } from "./xmltv.ts";
 import { xtreamEpgUrl } from "../ingest/xtream.ts";
-import { egress, vpnProxyUrl } from "../net/egress.ts";
+import { egress } from "../net/egress.ts";
 import { normalizeName } from "../canonical/normalize.ts";
 import { PRUNE_BEHIND_MS } from "./window.ts";
 import { invalidateGuideSnapshot } from "./snapshot.ts";
@@ -25,7 +25,7 @@ export async function providerEpgUrls(providerId?: number): Promise<EpgSource[]>
           ? xtreamEpgUrl(p.url, p.username, p.password)
           : null;
       if (!url) return null;
-      return { url, proxy: p.viaVpn ? vpnProxyUrl() : undefined }; // route VPN providers' EPG too
+      return { url, proxy: p.proxyUrl || undefined }; // route VPN providers' EPG too
     })
     .filter((s): s is EpgSource => !!s);
 }

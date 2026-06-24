@@ -64,6 +64,13 @@
       "when": 1782272213361,
       "tag": "0008_nervous_mac_gargan",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "6",
+      "when": 1782309792921,
+      "tag": "0009_right_terror",
+      "breakpoints": true
     }
   ]
 }

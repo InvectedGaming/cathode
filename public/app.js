@@ -168,6 +168,7 @@ const state = {
   providers: null,
   providerBusyId: null, // id currently syncing
   rules: null,
+  vpnDraft: null, // working copy of vpn.endpoints while editing
   ruleNew: null, // create-rule draft, or null
   ruleBusy: false,
   ruleError: null,
@@ -1095,6 +1096,54 @@ function settingsSection(title, ...rows) {
     ...rows);
 }
 
+function vpnEndpointsRow() {
+  if (!state.settings) return centered("…");
+  if (state.vpnDraft == null) state.vpnDraft = (state.settings["vpn.endpoints"] || []).map((e) => ({ name: e.name, url: e.url }));
+  const draft = state.vpnDraft;
+  const inputStyle = "height:38px;padding:0 11px;border-radius:9px;border:1px solid rgba(255,255,255,0.12);background:rgba(255,255,255,0.05);color:#eef0f2;font-size:13px;font-family:inherit;outline:none";
+  return h("div", { style: "padding:16px;display:flex;flex-direction:column;gap:11px" },
+    h("div", { style: "font-size:12.5px;color:#7e858c;line-height:1.5" }, "Define the VPN/proxy endpoints your sources can route through — e.g. one Gluetun per region. Each Source then picks one from a dropdown, so different sources can use different VPNs (Japan, UK, …)."),
+    ...draft.map((e, i) => h("div", { style: "display:flex;gap:8px;align-items:center" },
+      h("input", { value: e.name || "", placeholder: "Name (e.g. Japan)", onInput: (ev) => { draft[i].name = ev.target.value; }, style: inputStyle + ";width:150px;flex:none" }),
+      h("input", { value: e.url || "", placeholder: "http://gluetun-jp:8888", onInput: (ev) => { draft[i].url = ev.target.value; }, style: inputStyle + ";flex:1;font-family:'JetBrains Mono',monospace;font-size:12.5px" }),
+      h("button", { onClick: () => { draft.splice(i, 1); render(); }, title: "Remove", style: "width:34px;height:34px;flex:none;border-radius:8px;border:1px solid rgba(255,93,82,0.25);background:rgba(255,93,82,0.07);color:#ff8077;cursor:pointer;font-size:14px" }, "✕"))),
+    h("div", { style: "display:flex;gap:8px;margin-top:3px;align-items:center" },
+      h("button", { onClick: () => { draft.push({ name: "", url: "" }); render(); }, style: "height:36px;padding:0 14px;border-radius:9px;border:1px dashed rgba(255,255,255,0.2);background:transparent;color:#aeb4ba;font-size:13px;font-weight:600;cursor:pointer;font-family:inherit" }, "+ Add endpoint"),
+      h("div", { style: "flex:1" }),
+      h("button", { onClick: saveVpnEndpoints, style: "height:36px;padding:0 18px;border-radius:9px;border:none;background:" + AC + ";color:#06121c;font-size:13px;font-weight:700;cursor:pointer;font-family:inherit" }, "Save endpoints")));
+}
+async function saveVpnEndpoints() {
+  const eps = (state.vpnDraft || []).filter((e) => e.url && e.url.trim()).map((e) => ({ name: (e.name || "").trim() || e.url.trim(), url: e.url.trim() }));
+  const r = await fetch("/api/settings", { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ "vpn.endpoints": eps }) }).catch(() => null);
+  if (r && r.ok) { const d = await r.json(); state.settings = d.settings; state.vpnDraft = null; render(); }
+}
+
+async function regenerateStreamKey() {
+  if (!confirm("Generate a new stream key?\n\nExisting tuner setups (Plex/Jellyfin) and any ?key= links will STOP working until you update them with the new key.")) return;
+  const key = (crypto.randomUUID() + crypto.randomUUID()).replace(/-/g, "").slice(0, 27);
+  const r = await fetch("/api/settings", { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ "access.streamKey": key }) }).catch(() => null);
+  if (r && r.ok) { const d = await r.json(); state.settings = d.settings; render(); }
+}
+function accessRow() {
+  const key = (state.settings && state.settings["access.streamKey"]) || "";
+  const tunerUrl = location.origin + "/t/" + key;
+  const copyField = (val) => h("div", { style: "display:flex;gap:8px;margin-top:9px" },
+    h("input", { readonly: true, value: val, onClick: (e) => e.target.select(), style: "flex:1;min-width:0;height:38px;padding:0 12px;border-radius:9px;border:1px solid rgba(255,255,255,0.14);background:rgba(0,0,0,0.25);color:#eef0f2;font-size:12.5px;font-family:'JetBrains Mono',monospace;outline:none" }),
+    h("button", { onClick: (e) => copyText(val, e.target), style: "height:38px;padding:0 15px;border-radius:9px;border:none;background:#fff;color:#06121c;font-size:13px;font-weight:700;cursor:pointer;white-space:nowrap" }, "Copy"));
+  return h("div", { style: "padding:16px;display:flex;flex-direction:column;gap:18px" },
+    h("div", null,
+      h("div", { style: "font-size:13.5px;font-weight:600;color:#dfe3e7" }, "HDHomeRun tuner URL"),
+      h("div", { style: "font-size:12px;color:#7e858c;margin-top:2px" }, "Add this as the device URL in Plex / Jellyfin / Emby. The key in the path keeps your lineup and streams private."),
+      copyField(tunerUrl)),
+    h("div", null,
+      h("div", { style: "display:flex;align-items:center;justify-content:space-between;gap:10px" },
+        h("div", null,
+          h("div", { style: "font-size:13.5px;font-weight:600;color:#dfe3e7" }, "Stream key"),
+          h("div", { style: "font-size:12px;color:#7e858c;margin-top:2px" }, "Gates all streaming (also works as ?key=… on /stream URLs).")),
+        h("button", { onClick: regenerateStreamKey, style: "height:34px;padding:0 13px;border-radius:8px;border:1px solid rgba(244,183,64,0.35);background:rgba(244,183,64,0.1);color:#f4b740;font-size:12.5px;font-weight:600;cursor:pointer;white-space:nowrap;font-family:inherit" }, "Regenerate")),
+      copyField(key)));
+}
+
 function settingsScreen() {
   if (!state.settings) return centered("Loading settings…");
   const s = state.settings;
@@ -1121,10 +1170,10 @@ function settingsScreen() {
               dvrOn ? settingRow({ title: "Max DVR size", desc: "Cap total recording storage.", key: "dvr.maxGB", type: "number", suffix: "GB" }) : null,
               dvrOn ? settingRow({ title: "Max concurrent recordings", desc: "How many programs can record at once.", key: "dvr.maxConcurrentRecordings", type: "number" }) : null)
           : null,
+        settingsSection("ACCESS & TUNER", accessRow()),
         settingsSection("STREAMING",
           settingRow({ title: "Keep stream warm", desc: "Hold a channel's upstream this long after the last viewer leaves, so re-tuning is instant. Higher values keep a tuner slot in use longer.", key: "stream.keepWarmSeconds", type: "number", suffix: "sec" })),
-        settingsSection("VPN",
-          settingRow({ title: "VPN proxy URL", desc: "HTTP or SOCKS proxy (e.g. http://gluetun:8888 or socks5://gluetun:1080). Providers with VPN toggled on route their stream, EPG, and sync traffic through it. Leave blank to disable.", key: "vpn.proxyUrl", type: "text" })),
+        settingsSection("VPN ENDPOINTS", vpnEndpointsRow()),
         settingsSection("GUIDE",
           settingRow({ title: "EPG refresh interval", desc: "How often auto-refresh pulls new EPG.", key: "epg.refreshHours", type: "number", suffix: "hours" })))));
 }
@@ -1184,13 +1233,12 @@ function sourceModal() {
         h("div", { style: "display:flex;gap:12px" },
           h("div", { style: "width:130px" }, field("MAX STREAMS", "maxConnections", "4", "number")),
           h("div", { style: "flex:1" }, field("EPG URL (OPTIONAL)", "epgUrl", "xmltv.php?…"))),
-        // VPN toggle
-        h("div", { onClick: () => { f.viaVpn = !f.viaVpn; render(); }, style: "display:flex;align-items:center;gap:11px;padding:11px 13px;border-radius:10px;border:1px solid " + (f.viaVpn ? "rgba(127,220,160,0.4)" : "rgba(255,255,255,0.1)") + ";background:" + (f.viaVpn ? "rgba(127,220,160,0.08)" : "rgba(255,255,255,0.03)") + ";cursor:pointer" },
-          h("div", { style: "width:44px;height:25px;flex:none;border-radius:13px;background:" + (f.viaVpn ? "#7fdca0" : "rgba(255,255,255,0.14)") + ";position:relative;transition:background .15s" },
-            h("div", { style: "position:absolute;top:2px;left:" + (f.viaVpn ? "21px" : "2px") + ";width:21px;height:21px;border-radius:50%;background:#fff;transition:left .15s" })),
-          h("div", { style: "flex:1" },
-            h("div", { style: "font-size:13px;font-weight:600;color:#dfe3e7" }, "Route through VPN proxy"),
-            h("div", { style: "font-size:11.5px;color:#7e858c;margin-top:1px" }, vpnConfigured() ? "Stream + EPG + sync egress via your configured proxy." : "Set the VPN proxy URL in Settings to use this."))),
+        // VPN endpoint picker
+        h("div", { style: "display:flex;align-items:center;justify-content:space-between;gap:11px;padding:11px 13px;border-radius:10px;border:1px solid " + (f.proxyUrl ? "rgba(127,220,160,0.4)" : "rgba(255,255,255,0.1)") + ";background:" + (f.proxyUrl ? "rgba(127,220,160,0.08)" : "rgba(255,255,255,0.03)") },
+          h("div", null,
+            h("div", { style: "font-size:13px;font-weight:600;color:#dfe3e7" }, "VPN for this source"),
+            h("div", { style: "font-size:11.5px;color:#7e858c;margin-top:1px" }, vpnEndpoints().length ? "Routes stream + EPG + sync through the chosen endpoint." : "Add VPN endpoints in Settings → VPN first.")),
+          vpnSelect(f.proxyUrl, (url) => { f.proxyUrl = url; render(); })),
         state.addError ? h("div", { style: "margin-top:13px;padding:10px 12px;border-radius:9px;background:rgba(255,93,82,0.12);border:1px solid rgba(255,93,82,0.3);color:#ff8d85;font-size:12.5px" }, state.addError) : null),
       // footer
       h("div", { style: "padding:14px 22px 20px;display:flex;gap:10px;justify-content:flex-end;border-top:1px solid rgba(255,255,255,0.07)" },
@@ -1202,7 +1250,7 @@ function sourceModal() {
 }
 
 function openAddSource() {
-  state.addForm = { name: "", type: "xtream", url: "", username: "", password: "", maxConnections: 4, epgUrl: "", viaVpn: false };
+  state.addForm = { name: "", type: "xtream", url: "", username: "", password: "", maxConnections: 4, epgUrl: "", proxyUrl: "" };
   set({ addOpen: true, addError: null, addBusy: false });
 }
 function closeAddSource() {
@@ -1224,7 +1272,7 @@ async function submitAddSource() {
       password: f.type === "xtream" ? f.password.trim() : null,
       maxConnections: Number(f.maxConnections) || 1,
       epgUrl: f.epgUrl.trim() || null,
-      viaVpn: !!f.viaVpn,
+      proxyUrl: f.proxyUrl || null,
     };
     const res = await fetch("/api/providers", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
     if (!res.ok) throw new Error(`couldn't save source (${res.status})`);
@@ -1572,11 +1620,27 @@ async function toggleProvider(p) {
   await fetch("/api/providers/" + p.id, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ enabled: !p.enabled }) }).catch(() => {});
   await loadSources();
 }
-async function toggleProviderVpn(p) {
-  await fetch("/api/providers/" + p.id, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ viaVpn: !p.viaVpn }) }).catch(() => {});
+function vpnEndpoints() { return (state.settings && state.settings["vpn.endpoints"]) || []; }
+function vpnNameFor(url) { if (!url) return null; const e = vpnEndpoints().find((x) => x.url === url); return e ? (e.name || e.url) : "Custom"; }
+async function setProviderProxy(p, proxyUrl) {
+  await fetch("/api/providers/" + p.id, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ proxyUrl: proxyUrl || null }) }).catch(() => {});
   await loadSources();
 }
-function vpnConfigured() { return !!(state.settings && String(state.settings["vpn.proxyUrl"] || "").trim()); }
+// A dropdown of Direct / named endpoints / Custom. onPick(url) gets the chosen proxy URL.
+function vpnSelect(current, onPick) {
+  const eps = vpnEndpoints();
+  const cur = current || "";
+  const known = cur === "" || eps.some((e) => e.url === cur);
+  const stop = (e) => e.stopPropagation();
+  const sel = h("select", { onClick: stop, onMousedown: stop,
+    onChange: (e) => { const v = e.target.value; if (v === "__custom__") { const u = prompt("Proxy URL for this source (http://… or socks5://…):", cur); if (u != null) onPick(u.trim()); else render(); } else onPick(v); },
+    style: "appearance:none;-webkit-appearance:none;height:34px;padding:0 26px 0 11px;border-radius:8px;border:1px solid " + (cur ? "rgba(127,220,160,0.4)" : "rgba(255,255,255,0.12)") + ";background:" + (cur ? "rgba(127,220,160,0.1)" : "rgba(255,255,255,0.04)") + ";color:" + (cur ? "#7fdca0" : "#dfe3e7") + ";font-size:12.5px;font-weight:600;font-family:inherit;cursor:pointer" },
+    h("option", { value: "", selected: cur === "", style: "background:#16181c;color:#dfe3e7" }, "Direct (no VPN)"),
+    ...eps.map((e) => h("option", { value: e.url, selected: e.url === cur, style: "background:#16181c;color:#dfe3e7" }, e.name || e.url)),
+    h("option", { value: "__custom__", selected: !known, style: "background:#16181c;color:#dfe3e7" }, known ? "Custom…" : "Custom: " + cur));
+  return h("div", { style: "position:relative;display:inline-flex", onClick: stop }, sel,
+    h("span", { style: "position:absolute;right:9px;top:50%;transform:translateY(-50%);pointer-events:none;font-size:8px;color:#9aa0a6" }, "▾"));
+}
 async function deleteProvider(p) {
   if (!confirm("Remove “" + p.name + "”? Its channels/streams go with it (your other providers are untouched).")) return;
   await fetch("/api/providers/" + p.id, { method: "DELETE" }).catch(() => {});
@@ -1772,7 +1836,7 @@ function providerCard(p) {
         h("div", { style: "display:flex;align-items:center;gap:9px" },
           h("span", { style: "font-size:15.5px;font-weight:700;color:#eef0f2" }, p.name),
           pill(p.type.toUpperCase(), "rgb(140,200,255)"),
-          p.viaVpn ? pill("VPN", "rgb(127,220,160)") : null,
+          p.proxyUrl ? pill("VPN · " + vpnNameFor(p.proxyUrl), "rgb(127,220,160)") : null,
           off ? pill("DISABLED", "rgb(154,160,166)") : null),
         h("div", { style: "font-size:12px;color:#6b7178;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-family:'JetBrains Mono',monospace" }, p.url)),
       h("div", { style: "display:flex;gap:22px;flex:none;padding:0 6px" },
@@ -1782,10 +1846,10 @@ function providerCard(p) {
     h("div", { style: "display:flex;gap:8px;align-items:center;border-top:1px solid rgba(255,255,255,0.06);padding-top:13px" },
       action(busy ? "Syncing…" : "Sync now", () => syncProviderAction(p.id), { busy }),
       action(p.enabled ? "Disable" : "Enable", () => toggleProvider(p)),
-      // Per-source VPN toggle (the headline of this feature).
-      h("button", { onClick: () => toggleProviderVpn(p), title: p.viaVpn ? "Routing upstream through the VPN proxy" : "Route this provider's upstream through the VPN proxy", style: "height:34px;padding:0 12px;border-radius:8px;cursor:pointer;font-size:12.5px;font-weight:600;font-family:inherit;display:flex;align-items:center;gap:7px;border:1px solid " + (p.viaVpn ? "rgba(127,220,160,0.4)" : "rgba(255,255,255,0.12)") + ";background:" + (p.viaVpn ? "rgba(127,220,160,0.12)" : "rgba(255,255,255,0.04)") + ";color:" + (p.viaVpn ? "#7fdca0" : "#dfe3e7") },
-        h("img", { src: ICON("shield-check"), style: "width:14px;height:14px;filter:brightness(0) invert(" + (p.viaVpn ? ".75" : ".6") + ")" }), "VPN " + (p.viaVpn ? "on" : "off")),
-      p.viaVpn && !vpnConfigured() ? h("span", { style: "font-size:11px;color:#f4b740" }, "⚠ set proxy in Settings") : null,
+      // Per-source VPN endpoint picker — Direct, or any configured VPN.
+      h("div", { style: "display:flex;align-items:center;gap:7px" },
+        h("img", { src: ICON("shield-check"), style: "width:15px;height:15px;flex:none;filter:brightness(0) invert(" + (p.proxyUrl ? ".75" : ".5") + ")" }),
+        vpnSelect(p.proxyUrl, (url) => setProviderProxy(p, url))),
       h("div", { style: "flex:1" }),
       action("Remove", () => deleteProvider(p), { danger: true })));
 }
@@ -2115,7 +2179,7 @@ function attachMpegts(video, channelId, transcode) {
   // to resolve a relative "/stream/…" path against.
   const url = location.origin + (transcode ? "/watch/" : "/stream/") + channelId;
   const player = mpegts.createPlayer(
-    { type: "mpegts", isLive: true, url },
+    { type: "mpegts", isLive: true, url, withCredentials: true }, // send the session cookie to the gated /stream
     {
       enableWorker: true,
       // Smooth playback over chasing the live edge: edge-chasing seeks the video
@@ -2335,7 +2399,7 @@ function startTileMpegts(entry, channelId, transcode) {
   // ?as=preview so tile/mini previews don't skew real watch-time analytics.
   const url = location.origin + (transcode ? "/watch/" : "/stream/") + channelId + "?as=preview";
   const p = mpegts.createPlayer(
-    { type: "mpegts", isLive: true, url },
+    { type: "mpegts", isLive: true, url, withCredentials: true }, // gated /stream needs the session cookie
     { enableWorker: true, liveBufferLatencyChasing: false, lazyLoad: false, autoCleanupSourceBuffer: true },
   );
   entry.player = p;

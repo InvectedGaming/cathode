@@ -11,11 +11,11 @@ import { pool } from "../scheduler/pool.ts";
 import * as hdhr from "../tuner/hdhr.ts";
 import { buildView } from "./view.ts";
 import { getGuideSnapshot } from "../epg/snapshot.ts";
-import { getSettings, getSetting, setSetting, envLockedKeys, capabilities, type Settings } from "../settings.ts";
+import { getSettings, getSetting, setSetting, cachedSetting, envLockedKeys, capabilities, type Settings } from "../settings.ts";
 import { recordView, getAnalytics } from "../analytics.ts";
 import { getCookie, setCookie, deleteCookie } from "hono/cookie";
 import {
-  SESSION_COOKIE, userForToken, userCount, createUser, login, logout, publicUser, hashPassword,
+  SESSION_COOKIE, userForToken, userCount, createUser, login, logout, publicUser, hashPassword, channelVisible,
 } from "../auth.ts";
 import { users } from "../db/schema.ts";
 import {
@@ -226,49 +226,70 @@ app.get("/api/guide", async (c) => {
   });
 });
 
-// ─── HDHomeRun emulation (Plex/Jellyfin/Emby consume these) ───
-app.get("/discover.json", async (c) =>
-  (await getSetting("features.hdhr")) ? c.json(hdhr.discover(baseUrl(c))) : c.notFound());
-app.get("/lineup_status.json", async (c) =>
-  (await getSetting("features.hdhr")) ? c.json(hdhr.lineupStatus()) : c.notFound());
-app.get("/lineup.json", async (c) =>
-  (await getSetting("features.hdhr")) ? c.json(await hdhr.lineup(baseUrl(c))) : c.notFound());
+// ─── Stream access control ───
+// /stream + /watch + HDHR are NEVER open: a request must carry a valid session
+// (the web player's cookie) OR the stream key (devices use ?key=… ; HDHR tuners
+// use the /t/<key>/ path so Plex/Jellyfin — which derive URLs from the base —
+// keep the key on every call). The key is auto-generated on first boot.
+const STREAM_HEADERS = { "Content-Type": "video/mp2t", "Cache-Control": "no-cache, no-store", Connection: "keep-alive" } as const;
+function streamKey(): string { return String(cachedSetting("access.streamKey") || ""); }
+function streamAuth(c: Context<Env>): { ok: boolean; user?: User } {
+  const user = userForToken(getCookie(c, SESSION_COOKIE));
+  if (user) return { ok: true, user };
+  const k = streamKey();
+  if (k && c.req.query("key") === k) return { ok: true };
+  return { ok: false };
+}
+async function serveStream(c: Context<Env>, channelId: number, transcode: boolean, user?: User) {
+  // A restricted (non-admin) viewer can't stream a channel they aren't allowed to see.
+  if (user && user.role !== "admin") {
+    const ch = db.select({ category: channels.category }).from(channels).where(eq(channels.id, channelId)).get();
+    if (!channelVisible({ id: channelId, category: ch?.category ?? null }, user.restrictions)) return c.text("forbidden", 403);
+  }
+  if (transcode && !(await getSetting("features.transcode"))) return c.text("transcode disabled", 503);
+  const body = transcode ? await transcoder.open(channelId, c.req.raw.signal) : await muxer.open(channelId, c.req.raw.signal);
+  if (!body) return c.text(transcode ? "transcoder unavailable or no playable source" : "all tuners busy or no playable source", 503);
+  trackSession(c, channelId, transcode ? "transcode" : "passthrough");
+  return new Response(body, { headers: STREAM_HEADERS });
+}
 
-// ─── The stream endpoint: multiplexed MPEG-TS passthrough ───
+// Multiplexed MPEG-TS passthrough (web player via cookie, or ?key= for direct).
 app.get("/stream/:channelId", async (c) => {
   const channelId = Number(c.req.param("channelId"));
   if (!Number.isFinite(channelId)) return c.text("bad channel id", 400);
-
-  const body = await muxer.open(channelId, c.req.raw.signal);
-  if (!body) return c.text("all tuners busy or no playable source", 503);
-  trackSession(c, channelId, "passthrough");
-
-  return new Response(body, {
-    headers: {
-      "Content-Type": "video/mp2t",
-      "Cache-Control": "no-cache, no-store",
-      Connection: "keep-alive",
-    },
-  });
+  const auth = streamAuth(c);
+  if (!auth.ok) return c.text("unauthorized — sign in, or append ?key=<stream key>", 401);
+  return serveStream(c, channelId, false, auth.user);
 });
-
-// ─── Browser-friendly variant: video copy + audio→AAC (for AC-3/HEVC channels) ───
+// Browser-friendly variant: video copy + audio→AAC (AC-3/HEVC channels).
 app.get("/watch/:channelId", async (c) => {
   const channelId = Number(c.req.param("channelId"));
   if (!Number.isFinite(channelId)) return c.text("bad channel id", 400);
-  if (!(await getSetting("features.transcode"))) return c.text("transcode disabled", 503);
+  const auth = streamAuth(c);
+  if (!auth.ok) return c.text("unauthorized", 401);
+  return serveStream(c, channelId, true, auth.user);
+});
 
-  const body = await transcoder.open(channelId, c.req.raw.signal);
-  if (!body) return c.text("transcoder unavailable (is ffmpeg installed?) or no playable source", 503);
-  trackSession(c, channelId, "transcode");
-
-  return new Response(body, {
-    headers: {
-      "Content-Type": "video/mp2t",
-      "Cache-Control": "no-cache, no-store",
-      Connection: "keep-alive",
-    },
-  });
+// ─── HDHomeRun emulation, served under /t/<stream key>/ so the key rides every
+// derived URL. Point Plex/Jellyfin at  http://<host>:7777/t/<key> ───
+function tunerOk(c: Context<Env>): boolean {
+  const k = streamKey();
+  return !!k && c.req.param("key") === k;
+}
+app.get("/t/:key/discover.json", async (c) => {
+  if (!tunerOk(c) || !(await getSetting("features.hdhr"))) return c.notFound();
+  return c.json(hdhr.discover(`${baseUrl(c)}/t/${c.req.param("key")}`));
+});
+app.get("/t/:key/lineup_status.json", (c) => (tunerOk(c) ? c.json(hdhr.lineupStatus()) : c.notFound()));
+app.get("/t/:key/lineup.json", async (c) => {
+  if (!tunerOk(c) || !(await getSetting("features.hdhr"))) return c.notFound();
+  return c.json(await hdhr.lineup(`${baseUrl(c)}/t/${c.req.param("key")}`));
+});
+app.get("/t/:key/stream/:channelId", async (c) => {
+  if (!tunerOk(c)) return c.notFound();
+  const channelId = Number(c.req.param("channelId"));
+  if (!Number.isFinite(channelId)) return c.text("bad channel id", 400);
+  return serveStream(c, channelId, false); // a valid tuner key = full lineup access
 });
 
 // ─── Providers ───
@@ -294,7 +315,7 @@ app.patch("/api/providers/:id", async (c) => {
   const deny = ensureAdmin(c); if (deny) return deny;
   const id = Number(c.req.param("id"));
   const body = await c.req.json().catch(() => ({} as Record<string, unknown>));
-  const allowed = ["name", "url", "username", "password", "maxConnections", "epgUrl", "priority", "enabled", "viaVpn"];
+  const allowed = ["name", "url", "username", "password", "maxConnections", "epgUrl", "priority", "enabled", "proxyUrl"];
   const updates: Record<string, unknown> = {};
   for (const k of allowed) if (k in body && body[k] !== "") updates[k] = body[k];
   if (!Object.keys(updates).length) return c.json({ error: "nothing to update" }, 400);
@@ -326,7 +347,7 @@ app.post("/api/providers", async (c) => {
       maxConnections: body.maxConnections ?? 1,
       epgUrl: body.epgUrl ?? null,
       priority: body.priority ?? 100,
-      viaVpn: !!body.viaVpn,
+      proxyUrl: body.proxyUrl || null,
     })
     .returning();
   pool.setBudget(row.id, row.maxConnections);

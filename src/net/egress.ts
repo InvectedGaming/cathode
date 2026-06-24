@@ -1,28 +1,22 @@
 import { sqlite } from "../db/index.ts";
-import { cachedSetting } from "../settings.ts";
 
 /**
- * Per-source VPN passthrough. A provider flagged `via_vpn` has its UPSTREAM
- * fetches (stream pull, channel-list ingest, EPG) routed through the configured
- * proxy — typically a Gluetun container exposing an HTTP/SOCKS proxy. Providers
- * not flagged go out the host's normal connection. One instance, per-source.
+ * Per-source VPN passthrough. Each provider can carry its OWN `proxy_url` (a
+ * Gluetun/HTTP/SOCKS endpoint), so different sources can exit through different
+ * VPNs — source A → Japan, source B → UK — all on one Cathode instance.
+ * Providers with no proxy_url go out the host's normal connection.
  *
  * Bun's fetch honors `{ proxy }` for http(s):// and socks5:// proxies.
  */
 
-const viaVpnStmt = sqlite.prepare("SELECT via_vpn FROM providers WHERE id = ?");
+const proxyStmt = sqlite.prepare("SELECT proxy_url FROM providers WHERE id = ?");
 
-/** The globally-configured VPN proxy URL (e.g. http://gluetun:8888), or "". */
-export function vpnProxyUrl(): string {
-  return String(cachedSetting("vpn.proxyUrl") || "").trim();
-}
-
-/** Proxy to use for a provider's upstream traffic, or undefined for direct. */
+/** The proxy a provider's upstream traffic should use, or undefined for direct. */
 export function providerProxy(providerId: number | null | undefined): string | undefined {
   if (providerId == null) return undefined;
-  const row = viaVpnStmt.get(providerId) as { via_vpn: number } | undefined;
-  if (!row || !row.via_vpn) return undefined;
-  return vpnProxyUrl() || undefined;
+  const row = proxyStmt.get(providerId) as { proxy_url: string | null } | undefined;
+  const url = row?.proxy_url?.trim();
+  return url || undefined;
 }
 
 /** fetch() options carrying the proxy when one applies (spread into the init). */

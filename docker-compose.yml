@@ -1,12 +1,16 @@
 # Cathode — self-hosted IPTV manager + viewer
 #
-#   Just Cathode:          docker compose up -d            →  http://localhost:7777
+#   Just Cathode:            docker compose up -d            →  http://localhost:7777
 #   Cathode + VPN (Gluetun): docker compose --profile vpn up -d
 #
-# For VPN: copy .env.example → .env, fill in the VPN_* values, then run with
-# --profile vpn. Cathode reaches Gluetun's proxy at http://gluetun:8888 — set
-# that in Settings → VPN (or via CATHODE_VPN_PROXY in .env), then flip the
-# "VPN" toggle on whichever Sources you want tunneled. Everything else stays direct.
+# Create your admin account in the UI on first run. Streaming + the HDHomeRun
+# tuner are locked behind an auto-generated key — grab the tuner URL from
+# Settings → Access & Tuner and paste it into Plex/Jellyfin.
+#
+# VPN: run one Gluetun per region (each exposes an HTTP proxy on :8888). Add each
+# as a named endpoint in Settings → VPN, then per Source pick which VPN it uses —
+# Source A → Japan, Source B → UK, etc. Cathode runs OUTSIDE the tunnels and only
+# routes the sources you choose, so one instance mixes VPN and non-VPN providers.
 
 services:
   cathode:
@@ -19,22 +23,22 @@ services:
     volumes:
       - cathode-data:/data            # SQLite DB + DVR recordings persist here
     environment:
-      # Public URL clients use (HDHR discovery advertises it). Blank = request host.
-      BASE_URL: ${BASE_URL:-}
-      # Proxy for VPN-flagged sources. Blank = configure it in the UI instead.
-      # With the gluetun service below, use:  http://gluetun:8888
-      CATHODE_VPN_PROXY: ${CATHODE_VPN_PROXY:-}
+      BASE_URL: ${BASE_URL:-}         # public URL for HDHR discovery; blank = request host
+      CATHODE_STREAM_KEY: ${CATHODE_STREAM_KEY:-}   # pin the tuner/stream key; blank = auto-generated
       TZ: ${TZ:-UTC}
     networks: [cathode]
 
   # ──────────────────────────────────────────────────────────────────────────
-  # Optional VPN via Gluetun. Only starts with:  docker compose --profile vpn up
-  # Cathode runs OUTSIDE the tunnel and routes ONLY flagged sources through this
-  # proxy — so one instance serves both VPN and non-VPN providers.
+  # Optional VPN via Gluetun. Starts with:  docker compose --profile vpn up -d
+  # Add this container's proxy in Settings → VPN as an endpoint:
+  #     http://gluetun-jp:8888
+  # Want a second region? Copy this whole block to `gluetun-uk` with that
+  # region's creds (SERVER_COUNTRIES: United Kingdom), and add it as another
+  # endpoint (http://gluetun-uk:8888). Repeat per region.
   # ──────────────────────────────────────────────────────────────────────────
-  gluetun:
+  gluetun-jp:
     image: qmcgaw/gluetun:latest
-    container_name: gluetun
+    container_name: gluetun-jp
     profiles: ["vpn"]
     restart: unless-stopped
     cap_add:
@@ -46,14 +50,13 @@ services:
       VPN_SERVICE_PROVIDER: ${VPN_SERVICE_PROVIDER:-}
       VPN_TYPE: ${VPN_TYPE:-wireguard}
       # WireGuard:
-      WIREGUARD_PRIVATE_KEY: ${WIREGUARD_PRIVATE_KEY:-}
-      WIREGUARD_ADDRESSES: ${WIREGUARD_ADDRESSES:-}
+      WIREGUARD_PRIVATE_KEY: ${JP_WIREGUARD_PRIVATE_KEY:-}
+      WIREGUARD_ADDRESSES: ${JP_WIREGUARD_ADDRESSES:-}
       # OpenVPN (if VPN_TYPE=openvpn):
       OPENVPN_USER: ${OPENVPN_USER:-}
       OPENVPN_PASSWORD: ${OPENVPN_PASSWORD:-}
-      # Optional server selection:
-      SERVER_COUNTRIES: ${SERVER_COUNTRIES:-}
-      # Built-in HTTP proxy Cathode tunnels flagged sources through:
+      SERVER_COUNTRIES: ${JP_SERVER_COUNTRIES:-Japan}
+      # Built-in HTTP proxy Cathode routes chosen sources through:
       HTTPPROXY: "on"
       HTTPPROXY_LISTENING_ADDRESS: ":8888"
       TZ: ${TZ:-UTC}

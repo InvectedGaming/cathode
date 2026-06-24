@@ -28,7 +28,8 @@ export interface Settings {
   "timeshift.windowMinutes": number;
   "epg.refreshHours": number;
   "stream.keepWarmSeconds": number; // hold a channel's upstream this long after the last viewer
-  "vpn.proxyUrl": string; // HTTP/SOCKS proxy (e.g. Gluetun) for VPN-flagged providers
+  "vpn.endpoints": { name: string; url: string }[]; // named VPN/proxy endpoints sources can pick from
+  "access.streamKey": string; // secret gating /stream, /watch, and HDHR (devices use ?key=)
 }
 
 const DEFAULTS: Settings = {
@@ -45,7 +46,8 @@ const DEFAULTS: Settings = {
   "timeshift.windowMinutes": 120,
   "epg.refreshHours": 6,
   "stream.keepWarmSeconds": 5,
-  "vpn.proxyUrl": "",
+  "vpn.endpoints": [],
+  "access.streamKey": "", // auto-generated on first boot if unset
 };
 
 // Env overrides (ops/Docker). Present env value wins over DB + default.
@@ -62,7 +64,7 @@ const ENV_MAP: Partial<Record<keyof Settings, string>> = {
   "timeshift.windowMinutes": "CATHODE_TIMESHIFT_MINUTES",
   "epg.refreshHours": "CATHODE_EPG_REFRESH_HOURS",
   "stream.keepWarmSeconds": "CATHODE_STREAM_KEEPWARM",
-  "vpn.proxyUrl": "CATHODE_VPN_PROXY",
+  "access.streamKey": "CATHODE_STREAM_KEY",
 };
 
 function coerce(key: keyof Settings, raw: string): boolean | number | string {

@@ -102,30 +102,36 @@ docker compose up -d          # → http://localhost:7777
 ```
 
 Open the UI and create your **admin account** (the first account is the admin).
-Everything else — adding providers, EPG, rules, users, share links — is in the UI.
+Everything else — providers, EPG, rules, users, share links — is in the UI.
 
-### VPN passthrough (Gluetun)
+**Streaming is locked by default.** `/stream` and the HDHomeRun tuner require a
+session (the web player) or an auto-generated key. To connect Plex/Jellyfin/Emby,
+copy the tuner URL from **Settings → Access & Tuner** (looks like
+`http://<host>:7777/t/<key>`) and add it as the device.
 
-Cathode routes **only the sources you flag** through a VPN, on one instance — so
-you can mix VPN and non-VPN providers. It runs *outside* the tunnel and reaches
-Gluetun's built-in proxy; pick which providers use it per source.
+### VPN passthrough (Gluetun) — one VPN per source
 
-1. Put your VPN details in `.env` (`VPN_SERVICE_PROVIDER`, `WIREGUARD_PRIVATE_KEY`,
-   …, or the OpenVPN equivalents — see the [Gluetun wiki](https://github.com/qdm12/gluetun-wiki)).
-2. Start both with the `vpn` profile:
+Run **one Gluetun per region**; each Source picks which VPN it uses — Source A →
+Japan, Source B → UK, others direct. Cathode runs *outside* the tunnels, so one
+instance mixes VPN and non-VPN providers.
+
+1. Put your region's VPN details in `.env` (the compose ships a `gluetun-jp`
+   example — `JP_WIREGUARD_PRIVATE_KEY`, `JP_SERVER_COUNTRIES`, …; or the OpenVPN
+   equivalents — see the [Gluetun wiki](https://github.com/qdm12/gluetun-wiki)).
+2. Start with the `vpn` profile:
 
    ```bash
    docker compose --profile vpn up -d
    ```
 
-3. In the UI: **Settings → VPN** → set the proxy to `http://gluetun:8888`
-   (or set `CATHODE_VPN_PROXY=http://gluetun:8888` in `.env` to skip this step).
-4. In **Sources**, flip the **VPN** toggle on any provider you want tunneled.
-   Unflagged providers keep going out direct.
+3. In the UI: **Settings → VPN** → add an endpoint, e.g. name `Japan`, url
+   `http://gluetun-jp:8888`. Add one per region.
+4. In **Sources**, set each provider's **VPN** dropdown to Direct or any endpoint.
 
-A flagged provider's stream pull, channel-list sync, *and* EPG all egress through
-the VPN; the rest of Cathode (UI, HDHR, other providers) stays on your normal
-connection.
+For more regions, copy the `gluetun-jp` block in `docker-compose.yml` to
+`gluetun-uk` (with that region's creds) and add `http://gluetun-uk:8888` as another
+endpoint. A source's stream pull, channel-list sync, *and* EPG all egress through
+its chosen VPN; everything else stays on your normal connection.
 
 ### Adding to an existing stack
 
@@ -143,9 +149,10 @@ volumes: { cathode-data: }
 ```
 
 Already run **Gluetun** (or any HTTP/SOCKS proxy)? Don't network Cathode *through*
-it — just make sure they share a Docker network and point **Settings → VPN** at
-that proxy (e.g. `http://gluetun:8888` or `socks5://gluetun:1080`). The per-source
-toggle does the rest.
+it — just share a Docker network and add that proxy as an endpoint in
+**Settings → VPN** (e.g. `http://gluetun:8888` or `socks5://gluetun:1080`). The
+per-source dropdown does the rest, and you can register several proxies for
+several regions.
 
 ## The Aerial UI
 
@@ -206,9 +213,12 @@ The whole UI is driven by one aggregated endpoint, `GET /api/view`.
 - **Share links** — generate a login-free, expiring, revocable link to a single
   channel. Concurrent-viewer cap, single-use stream tickets (the media URL can't be
   hotlinked/scraped), `noindex`, and **instant live revoke** (cuts active viewers).
-- **Per-source VPN passthrough** — flag individual providers to route their upstream
-  through a proxy (e.g. [Gluetun](https://github.com/qdm12/gluetun)) while the rest go
-  direct — one instance, mixed VPN / non-VPN. See [Run with Docker](#run-with-docker).
+- **Per-source VPN passthrough** — register multiple VPN endpoints (e.g. several
+  [Gluetun](https://github.com/qdm12/gluetun) regions) and pick one per source —
+  Source A → Japan, Source B → UK, others direct. One instance, mixed VPN / non-VPN.
+  See [Run with Docker](#run-with-docker).
+- **Locked streaming** — `/stream` and the HDHomeRun tuner require a session or an
+  auto-generated key, so the lineup and streams aren't open to anyone who finds the URL.
 
 ## Roadmap
 

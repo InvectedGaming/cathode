@@ -23,7 +23,8 @@ export const providers = sqliteTable("providers", {
   epgUrl: text("epg_url"),
   priority: integer("priority").notNull().default(100), // lower = preferred
   enabled: integer("enabled", { mode: "boolean" }).notNull().default(true),
-  viaVpn: integer("via_vpn", { mode: "boolean" }).notNull().default(false), // route this provider's upstream through the VPN proxy
+  viaVpn: integer("via_vpn", { mode: "boolean" }).notNull().default(false), // deprecated — superseded by proxyUrl
+  proxyUrl: text("proxy_url"), // route this provider's upstream through this proxy (a Gluetun/VPN endpoint); null = direct
 
   lastSyncedAt: integer("last_synced_at", { mode: "timestamp" }),
 });
