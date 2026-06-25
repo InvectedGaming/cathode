@@ -2666,6 +2666,83 @@ function nextChannel(channelId, dir) {
   return list[(i + dir + list.length) % list.length].id;
 }
 
+// ── Player niceties: last-channel zap, number entry, sleep timer ──
+let lastPlayerChannelId = null; // the channel we were on before the current one
+let numberEntry = "";           // digits being typed on the "remote keypad"
+let numberEntryTimer = null;
+let sleepTimerId = null;
+let sleepTimerEnd = 0;           // epoch ms the sleep timer fires (0 = off)
+let sleepBadgeInterval = null;
+
+// Jump back to the previously-watched channel (TV "Last" button).
+function zapLast() {
+  if (lastPlayerChannelId != null && lastPlayerChannelId !== playerChannelId && state.data.channelsById[lastPlayerChannelId]) {
+    openPlayer(lastPlayerChannelId);
+  }
+}
+
+// Find a visible channel by its lineup number (for keypad entry).
+function channelByNumber(n) {
+  return state.data.channels.find((c) => !c.isHidden && c.num === n) || null;
+}
+
+// Keypad: accumulate digits, preview the match, commit on a pause or Enter.
+function pushDigit(d) {
+  numberEntry = (numberEntry + d).slice(0, 5);
+  renderNumberEntry();
+  if (numberEntryTimer) clearTimeout(numberEntryTimer);
+  numberEntryTimer = setTimeout(commitNumberEntry, 1500);
+}
+function commitNumberEntry() {
+  if (numberEntryTimer) { clearTimeout(numberEntryTimer); numberEntryTimer = null; }
+  const n = parseInt(numberEntry, 10);
+  numberEntry = "";
+  removeNumberEntry();
+  if (!isNaN(n)) { const ch = channelByNumber(n); if (ch) openPlayer(ch.id); }
+}
+function cancelNumberEntry() {
+  if (numberEntryTimer) { clearTimeout(numberEntryTimer); numberEntryTimer = null; }
+  numberEntry = "";
+  removeNumberEntry();
+}
+function renderNumberEntry() {
+  let el = document.getElementById("aerNumEntry");
+  if (!el) {
+    el = h("div", { id: "aerNumEntry", style: "position:fixed;top:84px;left:50%;transform:translateX(-50%);z-index:5;display:flex;flex-direction:column;align-items:center;gap:6px;padding:16px 26px;background:rgba(8,10,12,0.82);border:1px solid rgba(255,255,255,0.16);border-radius:14px;backdrop-filter:blur(10px);box-shadow:0 14px 40px rgba(0,0,0,0.55);pointer-events:none" });
+    document.body.appendChild(el);
+  }
+  const n = parseInt(numberEntry, 10);
+  const match = isNaN(n) ? null : channelByNumber(n);
+  el.replaceChildren(
+    h("div", { style: "font-family:'JetBrains Mono',monospace;font-size:34px;font-weight:700;letter-spacing:.08em;color:#fff" }, numberEntry || "—"),
+    h("div", { style: "font-size:13px;color:" + (match ? "#aeb4ba" : "#ff8079") + ";max-width:240px;text-align:center;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" }, match ? match.name : "No channel " + numberEntry));
+}
+function removeNumberEntry() { const el = document.getElementById("aerNumEntry"); if (el) el.remove(); }
+
+// Sleep timer: auto-close the player after N minutes (0 = cancel).
+function setSleepTimer(min) {
+  if (sleepTimerId) { clearTimeout(sleepTimerId); sleepTimerId = null; }
+  if (sleepBadgeInterval) { clearInterval(sleepBadgeInterval); sleepBadgeInterval = null; }
+  if (!min) { sleepTimerEnd = 0; refreshSleepBadge(); return; }
+  sleepTimerEnd = Date.now() + min * 60000;
+  sleepTimerId = setTimeout(() => { sleepTimerEnd = 0; sleepTimerId = null; closePlayer(); }, min * 60000);
+  sleepBadgeInterval = setInterval(refreshSleepBadge, 30000);
+  refreshSleepBadge();
+}
+function clearSleepTimer() {
+  if (sleepTimerId) { clearTimeout(sleepTimerId); sleepTimerId = null; }
+  if (sleepBadgeInterval) { clearInterval(sleepBadgeInterval); sleepBadgeInterval = null; }
+  sleepTimerEnd = 0;
+}
+function sleepMinutesLeft() { return sleepTimerEnd > Date.now() ? Math.ceil((sleepTimerEnd - Date.now()) / 60000) : 0; }
+function refreshSleepBadge() {
+  const b = document.getElementById("aerSleepBadge");
+  if (!b) return;
+  const left = sleepMinutesLeft();
+  if (left > 0) { b.textContent = left + "m"; b.style.display = ""; }
+  else b.style.display = "none";
+}
+
 function destroyMpegts() {
   if (mpegtsPlayer) {
     try { mpegtsPlayer.destroy(); } catch { /* noop */ }
@@ -2730,6 +2807,9 @@ function disarmPlayerAutohide() {
 
 function closePlayer() {
   disarmPlayerAutohide();
+  cancelNumberEntry();
+  clearSleepTimer();
+  lastPlayerChannelId = null;
   resetGuideHero(); // returning to the guide shows the hero again, then re-times
   if (!playerEl || !morphState) { if (playerEl) { playerEl.remove(); playerEl = null; } return; }
   const ms = morphState;
@@ -2839,23 +2919,50 @@ function attachMpegts(video, channelId, transcode) {
 function buildPlayerChrome(channelId) {
   const ch = state.data.channelsById[channelId];
   const on = onNowProgram(ch);
+  const now = Date.now();
+  const progs = programsFor(ch);
+  const next = on && !on.filler ? progs.find((p) => p.start >= on.end) : null;
+  const onNow = on && !on.filler && on.start <= now && on.end > now;
+  const prog = onNow ? Math.max(0, Math.min(1, (now - on.start) / (on.end - on.start || 1))) : 0;
   const surf = (dir) => () => openPlayer(nextChannel(playerChannelId, dir));
-  const topBtn = (kids, onClick) => h("button", { onClick, style: "width:38px;height:38px;border-radius:9px;border:1px solid rgba(255,255,255,0.14);background:rgba(8,10,12,0.55);display:flex;align-items:center;justify-content:center;cursor:pointer;pointer-events:auto" }, kids);
+  const topBtn = (kids, onClick, extra) => h("button", { onClick, style: "position:relative;width:38px;height:38px;border-radius:9px;border:1px solid " + ((extra && extra.active) ? "rgba(84,182,255,0.55)" : "rgba(255,255,255,0.14)") + ";background:" + ((extra && extra.active) ? "rgba(84,182,255,0.18)" : "rgba(8,10,12,0.55)") + ";display:flex;align-items:center;justify-content:center;cursor:pointer;pointer-events:auto", title: extra && extra.title }, kids);
+
+  // Sleep-timer button with a small dropdown of durations (toggled in-place so it
+  // survives without a chrome rebuild). A badge shows minutes remaining.
+  const sleepBadge = h("span", { id: "aerSleepBadge", style: "position:absolute;top:-6px;right:-6px;min-width:18px;height:18px;padding:0 4px;border-radius:9px;background:#54b6ff;color:#06121c;font-size:10px;font-weight:800;display:" + (sleepMinutesLeft() > 0 ? "flex" : "none") + ";align-items:center;justify-content:center;font-family:'JetBrains Mono',monospace" }, sleepMinutesLeft() > 0 ? sleepMinutesLeft() + "m" : "");
+  const menuItem = (lbl, m) => h("button", { onClick: (e) => { e.stopPropagation(); setSleepTimer(m); sleepMenu.style.display = "none"; }, style: "text-align:left;padding:8px 12px;border:none;background:transparent;color:#dfe3e7;font-size:13px;font-family:inherit;border-radius:7px;cursor:pointer;white-space:nowrap" }, lbl);
+  const sleepMenu = h("div", { onClick: (e) => e.stopPropagation(), style: "position:absolute;top:46px;right:0;display:none;flex-direction:column;background:rgba(12,14,18,0.97);border:1px solid rgba(255,255,255,0.12);border-radius:11px;padding:5px;gap:1px;backdrop-filter:blur(12px);box-shadow:0 14px 36px rgba(0,0,0,0.55);min-width:138px;pointer-events:auto" },
+    h("div", { style: "padding:7px 12px 5px;font-size:10px;font-weight:700;letter-spacing:.1em;color:#6b7178" }, "SLEEP TIMER"),
+    sleepMinutesLeft() > 0 ? menuItem("Turn off", 0) : null,
+    menuItem("15 minutes", 15), menuItem("30 minutes", 30), menuItem("45 minutes", 45), menuItem("60 minutes", 60), menuItem("90 minutes", 90));
+  const sleepBtn = h("button", { title: "Sleep timer", onClick: (e) => { e.stopPropagation(); sleepMenu.style.display = sleepMenu.style.display === "none" ? "flex" : "none"; }, style: "position:relative;width:38px;height:38px;border-radius:9px;border:1px solid " + (sleepMinutesLeft() > 0 ? "rgba(84,182,255,0.55)" : "rgba(255,255,255,0.14)") + ";background:" + (sleepMinutesLeft() > 0 ? "rgba(84,182,255,0.18)" : "rgba(8,10,12,0.55)") + ";display:flex;align-items:center;justify-content:center;cursor:pointer;pointer-events:auto" }, icon("moon", 17, 0.85), sleepBadge);
+  const sleepWrap = h("div", { style: "position:relative;pointer-events:auto" }, sleepBtn, sleepMenu);
+  // Last-channel zap (only once we have a previous channel to jump back to).
+  const lastBtn = (lastPlayerChannelId != null && lastPlayerChannelId !== channelId && state.data.channelsById[lastPlayerChannelId])
+    ? topBtn(icon("corner-up-left", 17, 0.85), zapLast, { title: "Last channel (Backspace)" }) : null;
 
   return h("div", { style: "position:fixed;inset:0;z-index:3;pointer-events:none;opacity:0;transition:opacity .26s ease .1s" },
-    h("div", { style: "position:absolute;top:0;left:0;right:0;padding:34px 22px 18px;display:flex;align-items:center;gap:14px;background:linear-gradient(180deg,rgba(0,0,0,0.75),transparent)" },
-      h("div", { style: "display:flex;align-items:center;gap:14px;pointer-events:auto" },
+    h("div", { style: "position:absolute;top:0;left:0;right:0;padding:34px 22px 18px;display:flex;align-items:flex-start;gap:14px;background:linear-gradient(180deg,rgba(0,0,0,0.78),transparent)" },
+      h("div", { style: "display:flex;align-items:center;gap:14px;pointer-events:auto;min-width:0;max-width:60%" },
         logoTile(ch, 44, 14),
-        h("div", null,
+        h("div", { style: "min-width:0" },
           h("div", { style: "display:flex;align-items:center;gap:9px" },
             h("span", { style: { fontFamily: "'JetBrains Mono',monospace", fontSize: "13px", fontWeight: 600, color: ch.color } }, "#" + (ch.num ?? "—")),
-            h("span", { style: "font-size:17px;font-weight:700" }, ch.name)),
-          h("div", { style: "font-size:13px;color:#b4bac0;margin-top:2px" }, on.filler ? "Live" : on.title))),
+            h("span", { style: "font-size:17px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" }, ch.name),
+            ch.isFavorite ? h("span", { style: "color:#f5c446;font-size:14px" }, "★") : null),
+          h("div", { style: "display:flex;align-items:center;gap:8px;margin-top:3px" },
+            h("span", { style: "font-size:13.5px;color:#e6e9ec;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" }, on.filler ? "Live" : on.title),
+            (onNow ? h("span", { style: "flex:none;font-family:'JetBrains Mono',monospace;font-size:11.5px;color:#9aa0a6" }, fmtClock(on.start) + "–" + fmtClock(on.end)) : null)),
+          onNow ? h("div", { style: "margin-top:6px;width:200px;max-width:42vw;height:3px;border-radius:2px;background:rgba(255,255,255,0.18)" },
+            h("div", { style: { height: "100%", width: Math.round(prog * 100) + "%", background: AC, borderRadius: "2px" } })) : null,
+          next ? h("div", { style: "font-size:12px;color:#8c9298;margin-top:6px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" }, "Up next · " + fmtClock(next.start) + "  " + next.title) : null)),
       h("div", { style: "flex:1" }),
       h("div", { style: "display:flex;gap:8px" },
-        topBtn(icon("chevron-up", 18, 0.85), surf(-1)),
-        topBtn(icon("chevron-down", 18, 0.85), surf(1)),
-        topBtn(icon("x", 18, 0.9), closePlayer))),
+        lastBtn,
+        sleepWrap,
+        topBtn(icon("chevron-up", 18, 0.85), surf(-1), { title: "Channel up" }),
+        topBtn(icon("chevron-down", 18, 0.85), surf(1), { title: "Channel down" }),
+        topBtn(icon("x", 18, 0.9), closePlayer, { title: "Close (Esc)" }))),
     h("div", { id: "aerPlayerStatus", style: "position:absolute;bottom:30px;left:50%;transform:translateX(-50%);font-size:13px;color:#cfd3d8;background:rgba(8,10,12,0.7);padding:8px 16px;border-radius:10px;backdrop-filter:blur(6px)" }, "Connecting…"));
 }
 
@@ -2880,6 +2987,8 @@ function openPlayer(channelId) {
   // video and refresh the chrome. No FLIP (we're already full-bleed).
   if (playerEl && morphState) {
     if (channelId === playerChannelId) return;
+    cancelNumberEntry();
+    lastPlayerChannelId = playerChannelId; // remember where we came from for "Last"
     destroyMpegts();
     playerChannelId = channelId;
     attachMpegts(morphState.video, channelId);
@@ -2896,6 +3005,7 @@ function openPlayer(channelId) {
   // Anchor the grow on the preview's current on-screen rect (or center if cold).
   const fromRect = warm && warm.video.isConnected ? warm.video.getBoundingClientRect() : centerRect();
   destroyAllTiles(); // stop the other background tiles (warm is already out of the registry)
+  lastPlayerChannelId = null; // fresh cold open — no in-session "last" yet
   playerChannelId = channelId;
 
   video.controls = false; // enabled only after the expand settles (avoids a control-bar pop mid-grow)
@@ -2953,9 +3063,12 @@ function openPlayer(channelId) {
 
 document.addEventListener("keydown", (e) => {
   if (!playerEl) return;
-  if (e.key === "Escape") closePlayer();
+  if (e.key >= "0" && e.key <= "9") { pushDigit(e.key); return; } // remote-style number entry
+  if (e.key === "Enter" && numberEntry) { commitNumberEntry(); return; }
+  if (e.key === "Escape") { if (numberEntry) { cancelNumberEntry(); return; } closePlayer(); }
   else if (e.key === "ArrowUp") openPlayer(nextChannel(playerChannelId, -1));
   else if (e.key === "ArrowDown") openPlayer(nextChannel(playerChannelId, 1));
+  else if (e.key === "Backspace") { e.preventDefault(); zapLast(); } // jump to last channel
 });
 
 // Remote-style navigation of the guide grid (arrows move the highlight, Enter watches).
