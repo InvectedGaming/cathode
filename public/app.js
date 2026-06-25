@@ -1607,7 +1607,7 @@ function analyticsScreen() {
 
   // now streaming
   const nowStreaming = activeStreams.length
-    ? h("div", { class: "aer-stagger", style: "padding:8px 8px 12px" },
+    ? h("div", { class: staggerClass(), style: "padding:8px 8px 12px" },
         ...activeStreams.map((s) => {
           const ch = cbi[s.channelId] || { name: "Channel " + s.channelId, mono: "?", grad: GRADS.general, color: SOLIDS.general };
           return h("div", { style: "display:flex;align-items:center;gap:12px;padding:8px 8px" },
@@ -1622,7 +1622,7 @@ function analyticsScreen() {
   // top channels
   const topMax = Math.max(1, ...a.topChannels.map((t) => t.secs));
   const topList = a.topChannels.length
-    ? h("div", { class: "aer-stagger", style: "padding:6px 8px 10px" },
+    ? h("div", { class: staggerClass(), style: "padding:6px 8px 10px" },
         ...a.topChannels.map((t) => {
           const ch = analyticsChan(t);
           return h("div", { style: "display:flex;align-items:center;gap:12px;padding:7px 8px" },
@@ -1640,7 +1640,7 @@ function analyticsScreen() {
   // most-watched shows
   const showMax = Math.max(1, ...a.topShows.map((s) => s.secs));
   const showsList = a.topShows.length
-    ? h("div", { class: "aer-stagger", style: "padding:6px 8px 10px" },
+    ? h("div", { class: staggerClass(), style: "padding:6px 8px 10px" },
         ...a.topShows.map((s) => {
           const col = SOLIDS[toGenre(s.category)];
           return h("div", { style: "display:flex;align-items:center;gap:12px;padding:7px 8px" },
@@ -1657,7 +1657,7 @@ function analyticsScreen() {
 
   // recent
   const recentList = a.recent.length
-    ? h("div", { class: "aer-stagger", style: "padding:6px 8px 10px" },
+    ? h("div", { class: staggerClass(), style: "padding:6px 8px 10px" },
         ...a.recent.map((r) => {
           const ch = analyticsChan(r);
           return h("div", { style: "display:flex;align-items:center;gap:12px;padding:7px 8px" },
@@ -1774,6 +1774,8 @@ function authScreen() {
 }
 
 let lastRenderedScreen = null;
+let screenEntering = false; // true only on the render that switches screens
+const staggerClass = () => (screenEntering ? "aer-stagger" : "");
 function render() {
   const root = document.getElementById("root");
   // Auth gate: until we know who's logged in, then the login/setup screen.
@@ -1789,6 +1791,9 @@ function render() {
   // Fade the main area only when the screen actually changes (not every render).
   const screenChanged = state.screen !== lastRenderedScreen;
   lastRenderedScreen = state.screen;
+  // Stagger-reveal animations should fire ONLY when entering a screen — replaying
+  // them on every in-screen re-render (a toggle, an open) makes lists flicker.
+  screenEntering = screenChanged;
   const main = h("div", { style: "flex:1;min-width:0;min-height:0;display:flex;flex-direction:column;position:relative" + (screenChanged ? ";animation:aerViewIn .3s ease" : "") }, mainArea());
   const body = mob ? main : h("div", { style: "flex:1;display:flex;min-height:0" }, leftRail(), main);
   // A full re-render resets every scroll container to the top. Snapshot the
@@ -2238,7 +2243,7 @@ function sourcesScreen() {
 
   return h("div", { style: "flex:1;display:flex;flex-direction:column;min-height:0" },
     header,
-    h("div", { "data-keep-scroll": "sources", class: "aer-stagger", style: "flex:1;overflow:auto;padding:0 26px 26px;display:flex;flex-direction:column;gap:11px" }, ...rows));
+    h("div", { "data-keep-scroll": "sources", class: staggerClass(), style: "flex:1;overflow:auto;padding:0 26px 26px;display:flex;flex-direction:column;gap:11px" }, ...rows));
 }
 function providerCard(p) {
   const busy = state.providerBusyId === p.id;
@@ -2387,7 +2392,7 @@ function usersScreen() {
 
   return h("div", { style: "flex:1;display:flex;flex-direction:column;min-height:0" },
     header, err, createForm,
-    h("div", { class: "aer-stagger", style: "flex:1;overflow:auto;padding:0 26px 26px;display:flex;flex-direction:column;gap:10px" }, ...rows));
+    h("div", { class: staggerClass(), style: "flex:1;overflow:auto;padding:0 26px 26px;display:flex;flex-direction:column;gap:10px" }, ...rows));
 }
 
 function userField(label, value, onInput, type) {
