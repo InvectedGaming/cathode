@@ -692,7 +692,10 @@ function guideScreen() {
   // video to reveal, so it just collapses to give the grid the room.
   const heroFaded = mob && state.heroHidden;
   const card = heroFaded
-    ? (ambient ? h("div", { id: "aerGuideHero", style: "flex:none;opacity:0;pointer-events:none" }, detailPane(ambient)) : null)
+    // Faded: an empty, tappable spacer that keeps the preview's space (video shows
+    // through) — tapping it brings the details back. Height matches the ambient
+    // card's min-height so there's no layout shift.
+    ? (ambient ? h("div", { id: "aerGuideHero", onClick: () => { showGuideHero(); render(); }, style: "flex:none;min-height:205px;cursor:pointer" }) : null)
     : h("div", { id: "aerGuideHero", style: "flex:none" }, detailPane(ambient));
   if (mob && !state.heroHidden && !heroHideTimer) armHeroAutohide(); // start the idle countdown
   const sheet = guideOptionsSheet();
