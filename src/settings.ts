@@ -32,6 +32,7 @@ export interface Settings {
   "access.streamKey": string; // secret gating /stream, /watch, and HDHR (devices use ?key=)
   "access.allowExternal": boolean; // allow tuner/M3U/EPG/stream exports off the local network (with key)
   "access.trustProxy": boolean; // resolve client IP from X-Forwarded-For (set true behind a reverse proxy)
+  "content.hideAdult": boolean; // auto-hide adult/XXX channels (on by default)
 }
 
 const DEFAULTS: Settings = {
@@ -52,6 +53,7 @@ const DEFAULTS: Settings = {
   "access.streamKey": "", // auto-generated on first boot if unset
   "access.allowExternal": false, // LAN-only by default
   "access.trustProxy": false,
+  "content.hideAdult": true, // hide adult/XXX channels by default
 };
 
 // Env overrides (ops/Docker). Present env value wins over DB + default.
@@ -71,6 +73,7 @@ const ENV_MAP: Partial<Record<keyof Settings, string>> = {
   "access.streamKey": "PHOSPHARR_STREAM_KEY",
   "access.allowExternal": "PHOSPHARR_ALLOW_EXTERNAL",
   "access.trustProxy": "PHOSPHARR_TRUST_PROXY",
+  "content.hideAdult": "PHOSPHARR_HIDE_ADULT",
 };
 
 function coerce(key: keyof Settings, raw: string): boolean | number | string {

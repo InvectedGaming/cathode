@@ -1241,7 +1241,11 @@ function saveSetting(key, value) {
   render();
   fetch("/api/settings", { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ [key]: value }) })
     .then((r) => (r.ok ? r.json() : null))
-    .then((s) => { if (s) { state.settings = s.settings; state.envLocked = s.envLocked || []; render(); } })
+    .then((s) => {
+      if (s) { state.settings = s.settings; state.envLocked = s.envLocked || []; render(); }
+      // Hiding/showing adult channels changes the lineup — refresh it.
+      if (key === "content.hideAdult") loadView();
+    })
     .catch(() => {});
 }
 
@@ -1357,6 +1361,8 @@ function settingsScreen() {
           h("div", { style: "padding:15px 16px;display:flex;gap:32px;flex-wrap:wrap" },
             statBlock(totalCh, "channels"),
             statBlock(withGuide, "with guide data"))),
+        settingsSection("CONTENT",
+          settingRow({ title: "Hide adult content", desc: "Auto-hide adult / XXX channels (matched by their category) from the guide, tuner, and exports. On by default. Toggling re-applies instantly.", key: "content.hideAdult", type: "toggle" })),
         settingsSection("FEATURES",
           settingRow({ title: "HDHomeRun tuner", desc: "Expose Phospharr as a tuner for Plex / Emby / Jellyfin.", key: "features.hdhr", type: "toggle" }),
           settingRow({ title: "Browser audio transcode", desc: "Convert AC-3 → AAC so those channels play in-browser (needs ffmpeg).", key: "features.transcode", type: "toggle" }),

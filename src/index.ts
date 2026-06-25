@@ -21,6 +21,10 @@ if (!settings["access.streamKey"]) {
 }
 startEpgScheduler(); // periodic XMLTV pulls per features.epgAutoRefresh / epg.refreshHours
 reconcileTunnels().catch((e) => console.error("[vpn] reconcile failed", e)); // dial autostart VPNs
+if (settings["content.hideAdult"]) {
+  const { applyAdultFilter } = await import("./content/adult.ts");
+  applyAdultFilter(true).catch((e) => console.error("[content] adult filter failed", e));
+}
 
 console.log(`
   ╔══════════════════════════════════════╗

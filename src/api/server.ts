@@ -6,6 +6,7 @@ import { startVpn, stopVpn, vpnStatus } from "../net/tunnel.ts";
 import { syncProvider } from "../ingest/sync.ts";
 import { syncEpgFromUrls, nowNext, providerEpgUrls } from "../epg/merge.ts";
 import { applyRules } from "../rules/engine.ts";
+import { applyAdultFilter } from "../content/adult.ts";
 import { muxer } from "../proxy/muxer.ts";
 import { transcoder } from "../proxy/transcode.ts";
 import { pool } from "../scheduler/pool.ts";
@@ -213,6 +214,8 @@ app.patch("/api/settings", async (c) => {
       /* skip unknown keys */
     }
   }
+  // Toggling adult-hiding re-applies it to the existing lineup immediately.
+  if ("content.hideAdult" in body) await applyAdultFilter(!!body["content.hideAdult"]);
   return c.json({ settings: await getSettings(), envLocked: envLockedKeys() });
 });
 
