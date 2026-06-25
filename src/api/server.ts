@@ -20,7 +20,7 @@ import { exportXmltv } from "../epg/export.ts";
 import { buildView } from "./view.ts";
 import { getGuideSnapshot } from "../epg/snapshot.ts";
 import { getSettings, getSetting, setSetting, cachedSetting, envLockedKeys, capabilities, type Settings } from "../settings.ts";
-import { recordView, getAnalytics } from "../analytics.ts";
+import { recordView, getAnalytics, recentChannels } from "../analytics.ts";
 import { getCookie, setCookie, deleteCookie } from "hono/cookie";
 import {
   SESSION_COOKIE, userForToken, userCount, createUser, login, logout, publicUser, hashPassword, channelVisible,
@@ -204,6 +204,8 @@ app.get("/api/health", (c) => c.json({ name: "Phospharr", version: "0.1.0", stat
 
 // ─── Analytics ───
 app.get("/api/analytics", (c) => ensureAdmin(c) ?? c.json(getAnalytics()));
+// Recently-watched channel ids — powers the Home "Jump back in" row (any user).
+app.get("/api/recent", (c) => c.json(recentChannels(14)));
 
 // ─── Settings + capabilities ───
 app.get("/api/capabilities", async (c) => c.json(await capabilities()));

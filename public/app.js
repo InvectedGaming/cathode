@@ -153,6 +153,7 @@ const state = {
   settings: null, // from /api/settings
   envLocked: [],
   analytics: null, // from /api/analytics
+  recent: null, // recently-watched channel ids from /api/recent (Home screen)
   statusLive: null, // from /api/status (live streaming)
   loading: true,
   error: null,
@@ -395,7 +396,7 @@ function topBar() {
 
 function leftRail() {
   const watchNav = [
-    { id: "home", label: "Home", icon: "house", soon: true },
+    { id: "home", label: "Home", icon: "house" },
     { id: "guide", label: "Guide", icon: "tv" },
     { id: "mosaic", label: "Mosaic", icon: "grid-2x2" },
     { id: "nowplaying", label: "Now Playing", icon: "play", soon: true },
@@ -409,7 +410,7 @@ function leftRail() {
     { id: "epg", label: "EPG Matcher", icon: "git-compare", soon: true },
     { id: "settings", label: "Settings", icon: "settings" },
   ];
-  const built = { guide: 1, mosaic: 1, channels: 1, settings: 1, analytics: 1, users: 1, sources: 1, rules: 1 };
+  const built = { home: 1, guide: 1, mosaic: 1, channels: 1, settings: 1, analytics: 1, users: 1, sources: 1, rules: 1 };
   const navSrc = state.mode === "watch" ? watchNav : manageNav;
   const d = state.data;
   const healthLine = !d
@@ -1810,6 +1811,76 @@ function analyticsScreen() {
 }
 
 // ===== root render =====
+// ===== HOME =====
+// A poster card for a channel: media (logo over the genre gradient) + name + the
+// program on now. Click to start watching.
+function homeCard(ch, mob) {
+  const on = onNowProgram(ch);
+  const now = Date.now();
+  const onNow = on && !on.filler && on.start <= now && on.end > now;
+  const prog = onNow ? Math.max(0, Math.min(1, (now - on.start) / (on.end - on.start || 1))) : 0;
+  const w = mob ? 142 : 162;
+  const mediaH = mob ? 82 : 92;
+  return h("button", { onClick: () => openPlayer(ch.id), title: "Watch " + ch.name, style: "flex:none;width:" + w + "px;border:none;background:transparent;padding:0;cursor:pointer;text-align:left;color:inherit;display:flex;flex-direction:column;gap:8px" },
+    h("div", { style: "position:relative;width:100%;height:" + mediaH + "px;border-radius:12px;overflow:hidden;background:" + ch.grad + ";border:1px solid rgba(255,255,255,0.08)" },
+      ch.logoUrl
+        ? h("img", { src: ch.logoUrl, loading: "lazy", style: "position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);max-width:62%;max-height:60%;object-fit:contain;filter:drop-shadow(0 2px 8px rgba(0,0,0,0.5))", onError: (e) => e.target.remove() })
+        : h("div", { style: "position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:22px;font-weight:800;color:rgba(255,255,255,0.85)" }, ch.mono),
+      onNow ? h("div", { style: "position:absolute;top:8px;left:8px;display:flex;align-items:center;gap:5px;padding:2px 7px;background:rgba(8,10,12,0.62);border-radius:6px;backdrop-filter:blur(4px)" },
+        h("span", { style: "width:5px;height:5px;border-radius:50%;background:#ff5d52;box-shadow:0 0 6px #ff5d52" }),
+        h("span", { style: "font-size:9px;font-weight:700;letter-spacing:.1em" }, "LIVE")) : null,
+      ch.isFavorite ? h("div", { style: "position:absolute;top:7px;right:8px;color:#f5c446;font-size:13px;text-shadow:0 1px 3px rgba(0,0,0,0.6)" }, "★") : null,
+      onNow ? h("div", { style: "position:absolute;left:0;right:0;bottom:0;height:3px;background:rgba(255,255,255,0.18)" },
+        h("div", { style: { height: "100%", width: Math.round(prog * 100) + "%", background: AC } })) : null),
+    h("div", { style: "min-width:0" },
+      h("div", { style: "display:flex;align-items:center;gap:6px;min-width:0" },
+        h("span", { style: { fontFamily: "'JetBrains Mono',monospace", fontSize: "10.5px", color: ch.color, flex: "none" } }, "#" + (ch.num ?? "—")),
+        h("span", { style: "font-size:13px;font-weight:600;color:#e6e9ec;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" }, ch.name)),
+      h("div", { style: "font-size:11.5px;color:#8c9298;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:2px" }, on && !on.filler ? on.title : "Live")));
+}
+
+function homeRow(title, key, items, mob, emptyNode) {
+  if (!items.length && !emptyNode) return null;
+  const pad = mob ? "16px" : "28px";
+  return h("div", { style: "display:flex;flex-direction:column;gap:12px" },
+    h("div", { style: "font-size:" + (mob ? "16px" : "17px") + ";font-weight:700;padding:0 " + pad }, title),
+    items.length
+      ? h("div", { "data-keep-scroll": "home-" + key, style: "display:flex;gap:14px;overflow-x:auto;padding:0 " + pad + " 6px;scrollbar-width:thin" }, ...items.map((ch) => homeCard(ch, mob)))
+      : h("div", { style: "padding:0 " + pad }, emptyNode));
+}
+
+function homeScreen() {
+  const d = state.data;
+  const mob = isMobile();
+  const byId = d.channelsById;
+  const hr = new Date().getHours();
+  const greet = hr < 5 ? "Good night" : hr < 12 ? "Good morning" : hr < 18 ? "Good afternoon" : "Good evening";
+  const uname = state.auth.user ? state.auth.user.username : "";
+
+  // Watch history: show what was watched even if it's since been curation-hidden
+  // (adult is already excluded server-side); only drop channels that no longer exist.
+  const recentChs = (state.recent || []).map((r) => byId[r.id]).filter(Boolean);
+  const favs = d.channels.filter((c) => c.isFavorite && !c.isHidden);
+  // "On now": browseable slice of channels with live guide data, favorites first.
+  const onNow = d.channels
+    .filter((c) => !c.isHidden && d.guide[c.id] && d.guide[c.id].length)
+    .sort((a, b) => (b.isFavorite ? 1 : 0) - (a.isFavorite ? 1 : 0) || (a.num ?? 1e9) - (b.num ?? 1e9))
+    .slice(0, 20);
+
+  const favEmpty = h("div", { style: "display:flex;align-items:center;gap:11px;padding:16px 18px;border:1px dashed rgba(255,255,255,0.12);border-radius:12px;color:#8c9298;font-size:13px;max-width:520px" },
+    h("span", { style: "color:#f5c446;font-size:18px" }, "★"),
+    "Tap the star on any channel — in the guide hero, the player, or search — and it'll line up here for one-tap access.");
+
+  return h("div", { "data-keep-scroll": "homeScroll", style: "flex:1;min-height:0;overflow-y:auto" },
+    h("div", { class: "aer-view", style: "padding:" + (mob ? "18px 16px 8px" : "26px 28px 12px") },
+      h("div", { style: "font-size:" + (mob ? "22px" : "27px") + ";font-weight:800;letter-spacing:-.015em" }, greet + (uname ? ", " + uname : "")),
+      h("div", { style: "font-size:13px;color:#8c9298;margin-top:4px" }, new Date().toLocaleDateString(undefined, { weekday: "long", month: "long", day: "numeric" }))),
+    h("div", { style: "display:flex;flex-direction:column;gap:" + (mob ? "22px" : "26px") + ";padding-bottom:46px;padding-top:" + (mob ? "8px" : "14px") },
+      homeRow("Jump back in", "recent", recentChs, mob),
+      homeRow("Favorites", "favs", favs, mob, favEmpty),
+      homeRow("On now", "onnow", onNow, mob)));
+}
+
 function mainArea() {
   if (state.loading) return centered("Loading lineup…");
   if (state.error) return centered("Couldn't reach the server: " + state.error);
@@ -1821,6 +1892,7 @@ function mainArea() {
   if (state.screen === "rules") return rulesScreen();
   if (state.screen === "settings") return settingsScreen();
   if (!state.data || state.data.channels.length === 0) return centered("No channels yet — add a provider and sync.");
+  if (state.screen === "home") return homeScreen();
   if (state.screen === "guide") return guideScreen();
   if (state.screen === "mosaic") return mosaicScreen();
   if (state.screen === "channels") return managerScreen();
@@ -1956,6 +2028,7 @@ function setMode(mode) {
 function setScreen(screen) {
   resetGuideHero();
   set({ screen, navOpen: false });
+  if (screen === "home") loadRecent();
   if (screen === "analytics") loadAnalytics();
   if (screen === "users") loadUsers();
   if (screen === "sources") loadSources();
@@ -2609,6 +2682,9 @@ async function loadAnalytics() {
   } catch {
     /* leave previous */
   }
+}
+async function loadRecent() {
+  try { const r = await fetch("/api/recent"); if (r.ok) { state.recent = await r.json(); render(); } } catch { /* leave previous */ }
 }
 function toggleRow(id) { state.selectedRows[id] = !state.selectedRows[id]; render(); }
 function toggleAll() {

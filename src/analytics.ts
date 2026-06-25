@@ -55,6 +55,22 @@ export function recordView(s: ViewSession): void {
   }
 }
 
+/** Distinct channels watched most recently (for the Home "Jump back in" row).
+ * Global (view_events isn't per-user) — fine for a self-hosted household.
+ * Adult-hidden channels are excluded so watch history can't resurface them;
+ * channels hidden only for curation (a hidden category/market) still show — it's
+ * the user's own history, and the guide-declutter shouldn't erase quick-resume. */
+export function recentChannels(limit = 12): { id: number; lastAt: number }[] {
+  return sqlite
+    .prepare(
+      `SELECT v.channel_id AS id, MAX(v.started_at) AS lastAt
+       FROM view_events v JOIN channels c ON c.id = v.channel_id
+       WHERE v.kind='watch' AND (c.hidden_reason IS NULL OR c.hidden_reason != 'adult')
+       GROUP BY v.channel_id ORDER BY lastAt DESC LIMIT ?`,
+    )
+    .all(limit) as { id: number; lastAt: number }[];
+}
+
 function windowTotals(sinceSec: number) {
   return sqlite
     .prepare(
