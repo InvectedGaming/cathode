@@ -1358,7 +1358,7 @@ function settingsScreen() {
     h("div", { style: "flex:none;padding:18px 24px 14px" },
       h("div", { style: "font-size:23px;font-weight:700;letter-spacing:-.01em" }, "Settings"),
       h("div", { style: "font-size:13px;color:#7e858c;margin-top:3px" }, "Enable only what you need — heavy features are off by default")),
-    h("div", { style: "flex:1;min-height:0;overflow:auto;padding:0 24px 24px" },
+    h("div", { "data-keep-scroll": "settings", style: "flex:1;min-height:0;overflow:auto;padding:0 24px 24px" },
       h("div", { style: "max-width:760px" },
         settingsSection("LIBRARY",
           h("div", { style: "padding:15px 16px;display:flex;gap:32px;flex-wrap:wrap" },
@@ -1675,7 +1675,7 @@ function analyticsScreen() {
         h("div", { style: "font-size:13px;color:#7e858c;margin-top:3px" }, fmtDuration(a.all.secs) + " watched all-time · " + a.all.sessions + " sessions")),
       h("button", { style: "height:34px;padding:0 14px;border-radius:8px;border:1px solid rgba(255,255,255,0.1);background:rgba(255,255,255,0.04);color:#dfe3e7;font-size:12.5px;font-weight:600;cursor:pointer;display:flex;align-items:center;gap:7px", onClick: loadAnalytics },
         icon("refresh-cw", 14, 0.7), "Refresh")),
-    h("div", { style: "flex:1;min-height:0;overflow:auto;padding:0 " + (mob ? "14px" : "24px") + " 24px" },
+    h("div", { "data-keep-scroll": "analytics", style: "flex:1;min-height:0;overflow:auto;padding:0 " + (mob ? "14px" : "24px") + " 24px" },
       h("div", { style: "display:grid;grid-template-columns:" + (mob ? "1fr 1fr" : "repeat(4,1fr)") + ";gap:14px;margin-bottom:16px" },
         kpiCard("WATCH TIME TODAY", fmtDuration(a.today.secs), a.today.sessions + " sessions"),
         kpiCard("WATCH TIME · 7 DAYS", fmtDuration(a.week.secs), a.week.sessions + " sessions"),
@@ -1790,6 +1790,11 @@ function render() {
   lastRenderedScreen = state.screen;
   const main = h("div", { style: "flex:1;min-width:0;min-height:0;display:flex;flex-direction:column;position:relative" + (screenChanged ? ";animation:aerViewIn .3s ease" : "") }, mainArea());
   const body = mob ? main : h("div", { style: "flex:1;display:flex;min-height:0" }, leftRail(), main);
+  // A full re-render resets every scroll container to the top. Snapshot the
+  // scroll position of marked panels (data-keep-scroll) and restore it after, so
+  // toggling something deep in a list doesn't fling you back to the top.
+  const scrollSnap = {};
+  for (const el of root.querySelectorAll("[data-keep-scroll]")) scrollSnap[el.getAttribute("data-keep-scroll")] = [el.scrollLeft, el.scrollTop];
   root.replaceChildren(
     topBar(),
     body,
@@ -1798,6 +1803,10 @@ function render() {
     sourceModal() || h("div", { style: "display:none" }),
     shareModal() || h("div", { style: "display:none" }),
   );
+  for (const el of root.querySelectorAll("[data-keep-scroll]")) {
+    const s = scrollSnap[el.getAttribute("data-keep-scroll")];
+    if (s) { el.scrollLeft = s[0]; el.scrollTop = s[1]; }
+  }
   reconcileTiles(); // tear down any tile player no longer on screen
 }
 
@@ -1974,7 +1983,7 @@ function categoriesRow() {
     return h("div", null, header, ...(expanded ? g.members.map((c) => catRow(c, true)) : []));
   });
 
-  return h("div", { style: "max-height:440px;overflow:auto" }, search, ...groupRows);
+  return h("div", { "data-keep-scroll": "categories", style: "max-height:440px;overflow:auto" }, search, ...groupRows);
 }
 
 // ===== native VPN tunnels =====
