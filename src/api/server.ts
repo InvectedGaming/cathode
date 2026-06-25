@@ -224,8 +224,8 @@ app.patch("/api/settings", async (c) => {
       /* skip unknown keys */
     }
   }
-  // Content-filter changes (adult / hidden categories) re-apply to the lineup now.
-  if ("content.hideAdult" in body || "content.hiddenCategories" in body) await reconcileAutoHides();
+  // Content-filter changes (adult / categories / dedupe) re-apply to the lineup now.
+  if ("content.hideAdult" in body || "content.hiddenCategories" in body || "content.dedupeLocals" in body) await reconcileAutoHides();
   return c.json({ settings: await getSettings(), envLocked: envLockedKeys() });
 });
 

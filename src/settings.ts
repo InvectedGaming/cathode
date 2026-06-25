@@ -34,6 +34,7 @@ export interface Settings {
   "access.trustProxy": boolean; // resolve client IP from X-Forwarded-For (set true behind a reverse proxy)
   "content.hideAdult": boolean; // auto-hide adult/XXX channels (on by default)
   "content.hiddenCategories": string[]; // whole categories the admin chose to hide
+  "content.dedupeLocals": boolean; // collapse duplicate local stations (same callsign)
 }
 
 const DEFAULTS: Settings = {
@@ -56,6 +57,7 @@ const DEFAULTS: Settings = {
   "access.trustProxy": false,
   "content.hideAdult": true, // hide adult/XXX channels by default
   "content.hiddenCategories": [],
+  "content.dedupeLocals": true, // collapse duplicate local stations by default
 };
 
 // Env overrides (ops/Docker). Present env value wins over DB + default.
@@ -76,6 +78,7 @@ const ENV_MAP: Partial<Record<keyof Settings, string>> = {
   "access.allowExternal": "PHOSPHARR_ALLOW_EXTERNAL",
   "access.trustProxy": "PHOSPHARR_TRUST_PROXY",
   "content.hideAdult": "PHOSPHARR_HIDE_ADULT",
+  "content.dedupeLocals": "PHOSPHARR_DEDUPE_LOCALS",
 };
 
 function coerce(key: keyof Settings, raw: string): boolean | number | string {

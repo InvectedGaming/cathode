@@ -15,18 +15,50 @@ import { isAdult } from "./adult.ts";
  * from the list or turn off adult-hiding and the matching channels reappear.
  */
 
-const isAutoReason = (r: string | null): boolean => r === "adult" || (typeof r === "string" && r.startsWith("cat:"));
+const isAutoReason = (r: string | null): boolean => r === "adult" || r === "dup" || (typeof r === "string" && r.startsWith("cat:"));
+
+type LocalRow = { id: number; name: string; category: string | null };
+// A US broadcast callsign (KxxX / WxxX) uniquely identifies a station, so two
+// local channels with the same one are the same station listed twice.
+function localCallsign(name: string | null): string | null {
+  const m = (name ?? "").match(/\b([KW][A-Z]{2,3})\b/);
+  return m ? m[1] : null;
+}
+// Prefer the per-network copy ("USA Local - NBC") over the "Full List"/MISC one.
+const localCatRank = (c: string | null): number => (/USA Local - (NBC|ABC|CBS|FOX)/i.test(c ?? "") ? 0 : /MISC/i.test(c ?? "") ? 1 : 2);
+
+/** Duplicate local stations to hide (every copy but the best-named per callsign). */
+function computeLocalDuplicates(rows: LocalRow[]): Set<number> {
+  const byCall = new Map<string, LocalRow[]>();
+  for (const ch of rows) {
+    if (categoryGroup(ch.category) !== "Local") continue;
+    const cs = localCallsign(ch.name);
+    if (!cs) continue;
+    if (!byCall.has(cs)) byCall.set(cs, []);
+    byCall.get(cs)!.push(ch);
+  }
+  const dup = new Set<number>();
+  for (const g of byCall.values()) {
+    if (g.length < 2) continue;
+    g.sort((a, b) => localCatRank(a.category) - localCatRank(b.category) || a.id - b.id);
+    for (let i = 1; i < g.length; i++) dup.add(g[i].id); // keep g[0]
+  }
+  return dup;
+}
 
 export async function reconcileAutoHides(): Promise<number> {
   const hideAdult = await getSetting("content.hideAdult");
   const hiddenCats = new Set((await getSetting("content.hiddenCategories")) ?? []);
+  const dedupe = await getSetting("content.dedupeLocals");
   const rows = await db.select().from(channels);
+  const dupIds = dedupe ? computeLocalDuplicates(rows) : new Set<number>();
 
   let changed = 0;
   for (const ch of rows) {
     const adult = hideAdult && isAdult(ch.category, ch.name);
     const catHidden = ch.category != null && hiddenCats.has(ch.category);
-    const reason = adult ? "adult" : catHidden ? `cat:${ch.category}` : null;
+    const isDup = dupIds.has(ch.id);
+    const reason = adult ? "adult" : catHidden ? `cat:${ch.category}` : isDup ? "dup" : null;
     const auto = isAutoReason(ch.hiddenReason);
 
     if (reason) {
