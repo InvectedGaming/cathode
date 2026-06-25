@@ -596,8 +596,6 @@ function guideOptionsSheet() {
       divider(),
       toggleRow("Network grouping", "Collapse local affiliates into one row.", state.networkGroup !== false, toggleNetGroup),
       divider(),
-      toggleRow("Live previews", "Play the focused channel as a live preview.", state.previews !== false, togglePreviews),
-      divider(),
       toggleRow("Ambient backdrop", "Play the focused channel behind the grid.", state.ambient !== false, toggleAmbient)));
 }
 
@@ -654,8 +652,12 @@ function guideScreen() {
       const jumpBtn = h("button", { style: "height:36px;padding:0 15px;border-radius:9px;border:1px solid rgba(255,255,255,0.1);background:rgba(255,255,255,0.04);color:#dfe3e7;font-size:13px;font-weight:600;display:flex;align-items:center;gap:7px;cursor:pointer", onClick: () => { guideScrollLeft = null; render(); } },
         h("span", { style: "width:7px;height:7px;border-radius:50%;background:#54b6ff;box-shadow:0 0 8px #54b6ff" }), "Jump to now");
       if (mob) {
-        // Phones: fold the toggle cluster into a single labeled Options sheet.
+        // Phones: a direct Live-preview toggle + a single labeled Options sheet.
+        const previewsOn = state.previews !== false;
+        const previewBtn = h("button", { onClick: togglePreviews, title: previewsOn ? "Live preview on — tap to stop" : "Live preview off — tap to enable", style: "width:36px;height:36px;flex:none;border-radius:9px;border:1px solid " + (previewsOn ? "rgba(84,182,255,0.5)" : "rgba(255,255,255,0.1)") + ";background:" + (previewsOn ? "rgba(84,182,255,0.16)" : "rgba(255,255,255,0.04)") + ";display:flex;align-items:center;justify-content:center;cursor:pointer" },
+          icon(previewsOn ? "monitor-play" : "monitor-off", 16, previewsOn ? 0.85 : 0.55));
         return h("div", { style: "display:flex;gap:8px;align-items:center;flex-wrap:wrap" },
+          previewBtn,
           h("button", { onClick: () => set({ guideOptionsOpen: true }), style: "height:36px;padding:0 14px;border-radius:9px;border:1px solid rgba(255,255,255,0.12);background:rgba(255,255,255,0.05);color:#dfe3e7;font-size:13px;font-weight:600;display:flex;align-items:center;gap:8px;cursor:pointer" },
             icon("sliders-horizontal", 15, 0.8), "Options"),
           jumpBtn);
