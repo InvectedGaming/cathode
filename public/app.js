@@ -143,6 +143,9 @@ const state = {
   networkGroup: localStorage.getItem("phospharr.netgroup") !== "off", // collapse affiliate clusters into one row
   networkSelection: loadNetSel(), // per-network: which affiliate/market is active
   previews: prefDefault("phospharr.previews"), // auto-play live preview in the guide (off by default on phones)
+  favoritesOnly: false, // guide filter: show only starred channels
+  searchOpen: false, // global channel/program search overlay open?
+  searchQ: "", // current search query
   activeTileId: "t0",
   promotedTileId: null,
   selectedRows: {},
@@ -365,11 +368,13 @@ function topBar() {
       h("span", { style: "width:16px;height:2px;border-radius:2px;background:#cfd3d8" }),
       h("span", { style: "width:16px;height:2px;border-radius:2px;background:#cfd3d8" }),
       h("span", { style: "width:16px;height:2px;border-radius:2px;background:#cfd3d8" }));
+    const searchBtn = h("button", { title: "Search", onClick: openSearch, style: "width:38px;height:38px;flex:none;border-radius:10px;border:1px solid rgba(255,255,255,0.1);background:rgba(255,255,255,0.04);display:flex;align-items:center;justify-content:center;cursor:pointer" },
+      icon("search", 16, 0.65));
     return h("div", { class: "aer-topbar",
       style: "flex:none;display:flex;align-items:center;gap:11px;padding:0 12px;border-bottom:1px solid rgba(255,255,255,0.07);background:rgba(18,20,22,0.85);backdrop-filter:blur(20px);position:relative;z-index:30" },
       burger, brandGlyph,
       h("div", { style: "font-weight:700;font-size:15px;letter-spacing:.1em;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" }, "PHOSPHARR"),
-      avatar, signOut);
+      searchBtn, avatar, signOut);
   }
 
   return h("div", { class: "aer-topbar",
@@ -379,7 +384,7 @@ function topBar() {
       h("div", { style: "font-weight:700;font-size:17px;letter-spacing:.16em" }, "PHOSPHARR")),
     modeSwitch(),
     h("div", { style: "flex:1" }),
-    h("div", { style: "display:flex;align-items:center;gap:9px;height:36px;padding:0 13px;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);border-radius:9px;min-width:230px;color:#7e858c" },
+    h("div", { onClick: openSearch, title: "Search channels & shows", style: "display:flex;align-items:center;gap:9px;height:36px;padding:0 13px;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);border-radius:9px;min-width:230px;color:#7e858c;cursor:pointer;transition:border-color .15s" },
       h("img", { src: ICON("search"), style: "width:15px;height:15px;filter:brightness(0) invert(.55)" }),
       h("span", { style: "font-size:13.5px" }, "Search channels, shows…")),
     h("div", { style: "display:flex;align-items:center;gap:7px;padding:0 12px;height:36px;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);border-radius:9px" },
@@ -534,12 +539,105 @@ function groupByNetwork(list) {
 function guideVisible() {
   const d = state.data;
   let v = d.channels.filter((c) => !c.isHidden);
-  if (state.guideOnlyWithEpg !== false) {
+  if (state.favoritesOnly) v = v.filter((c) => c.isFavorite); // star filter (overrides the EPG filter)
+  else if (state.guideOnlyWithEpg !== false) {
     const withEpg = v.filter((ch) => d.guide[ch.id] && d.guide[ch.id].length);
     if (withEpg.length) v = withEpg; // don't filter to empty if no EPG synced yet
   }
   if (state.networkGroup !== false) v = groupByNetwork(v);
   return v;
+}
+
+// Star / unstar a channel. Optimistic: channelsById shares object refs with the
+// channels array, so one mutation updates the guide, hero and Favorites filter at
+// once; the PATCH just persists it.
+async function toggleFavorite(ch) {
+  if (!ch) return;
+  const next = !ch.isFavorite;
+  ch.isFavorite = next;
+  render();
+  try {
+    await fetch("/api/channels/" + ch.id, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ isFavorite: next }) });
+  } catch { /* keep the optimistic state; a reload will resync from the server */ }
+}
+
+// Count of starred channels (drives the Favorites toggle's enabled/empty state).
+function favoriteCount() {
+  return (state.data && state.data.channels) ? state.data.channels.filter((c) => c.isFavorite && !c.isHidden).length : 0;
+}
+
+// ===== global search =====
+let searchFocused = false; // has the input grabbed focus since this open? (autofocus is unreliable for dynamically-inserted nodes)
+function openSearch() { searchFocused = false; set({ searchOpen: true, searchQ: "" }); }
+function closeSearch() { searchFocused = false; set({ searchOpen: false }); }
+
+// Match non-hidden channels by name, then by the title of what's on right now.
+// Multi-word queries are ANDed across name + on-now title, so "cbs springfield"
+// finds "Springfield CBS …" even though those words aren't contiguous. Ranked:
+// whole-query name-prefix > all-words-in-name > all-words-in name+title.
+function searchResults(q) {
+  const d = state.data;
+  const ql = (q || "").trim().toLowerCase();
+  if (!d || !ql) return [];
+  const tokens = ql.split(/\s+/).filter(Boolean);
+  const all = (str, toks) => toks.every((t) => str.includes(t));
+  const out = [];
+  for (const ch of d.channels) {
+    if (ch.isHidden) continue;
+    const name = (ch.name || "").toLowerCase();
+    const prog = onNowProgram(ch);
+    const ptitle = prog && !prog.filler && prog.title ? prog.title.toLowerCase() : "";
+    let score = -1;
+    if (name.startsWith(ql)) score = 0;
+    else if (all(name, tokens)) score = 1;
+    else if (all(name + " " + ptitle, tokens)) score = 2;
+    if (score < 0) continue;
+    out.push({ ch, prog, score });
+  }
+  out.sort((a, b) => a.score - b.score || (a.ch.num ?? 1e9) - (b.ch.num ?? 1e9));
+  return out.slice(0, 60);
+}
+
+function searchOverlay() {
+  if (!state.searchOpen) return null;
+  const mob = isMobile();
+  const q = state.searchQ || "";
+  const results = searchResults(q);
+  const total = state.data ? state.data.channels.filter((c) => !c.isHidden).length : 0;
+  const pick = (ch) => { closeSearch(); openPlayer(ch.id); };
+  const onKey = (e) => {
+    if (e.key === "Escape") { e.preventDefault(); closeSearch(); }
+    else if (e.key === "Enter" && results.length) { e.preventDefault(); pick(results[0].ch); }
+  };
+  // Grab focus on the first frame after opening (autofocus doesn't fire for nodes
+  // inserted by replaceChildren); subsequent keystrokes are kept focused by the
+  // data-focus-key restore in render().
+  if (!searchFocused) { searchFocused = true; requestAnimationFrame(() => { const el = document.querySelector('[data-focus-key="search"]'); if (el) el.focus(); }); }
+
+  const row = ({ ch, prog }) => h("button", { onClick: () => pick(ch), style: "display:flex;align-items:center;gap:12px;width:100%;padding:9px 14px;border:none;border-bottom:1px solid rgba(255,255,255,0.04);background:transparent;cursor:pointer;text-align:left;color:inherit" },
+    logoTile(ch, 34, 12, 8),
+    h("div", { style: "flex:1;min-width:0" },
+      h("div", { style: "display:flex;align-items:center;gap:7px" },
+        h("span", { style: "font-family:'JetBrains Mono',monospace;font-size:11px;color:#6b7178;flex:none" }, "#" + (ch.num ?? "—")),
+        h("span", { style: "font-size:14px;font-weight:600;color:#e6e9ec;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" }, ch.name),
+        ch.isFavorite ? h("span", { style: "color:#f5c446;font-size:12px;flex:none", title: "Favorite" }, "★") : null),
+      h("div", { style: "font-size:12px;color:#8c9298;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:1px" }, prog && !prog.filler ? prog.title : "No guide data")),
+    h("span", { style: "flex:none;width:30px;height:30px;border-radius:8px;background:rgba(255,255,255,0.05);display:flex;align-items:center;justify-content:center" }, icon("play", 14, 0.85)));
+
+  const body = results.length
+    ? h("div", null, ...results.map(row))
+    : h("div", { style: "padding:" + (q.trim() ? "34px" : "30px") + " 20px;text-align:center;color:#7e858c;font-size:13.5px;line-height:1.5" },
+        q.trim() ? "No channels or shows match “" + q.trim() + "”" : "Search " + total + " channels by name — or by what's on right now.");
+
+  const panel = h("div", { onClick: (e) => e.stopPropagation(), style: "width:min(560px,94vw);max-height:" + (mob ? "78vh" : "70vh") + ";margin:" + (mob ? "64px auto 0" : "84px auto 0") + ";background:rgba(20,22,26,0.97);border:1px solid rgba(255,255,255,0.1);border-radius:16px;box-shadow:0 30px 80px rgba(0,0,0,0.62);overflow:hidden;display:flex;flex-direction:column;backdrop-filter:blur(20px);animation:aerFadeUp .2s ease" },
+    h("div", { style: "display:flex;align-items:center;gap:11px;padding:12px 14px;border-bottom:1px solid rgba(255,255,255,0.07)" },
+      icon("search", 17, 0.6),
+      h("input", { value: q, placeholder: "Search channels, shows…", "data-focus-key": "search", onInput: (e) => { state.searchQ = e.target.value; render(); }, onKeydown: onKey,
+        style: "flex:1;background:transparent;border:none;outline:none;color:#fff;font-size:16px;font-family:inherit;min-width:0" }),
+      h("button", { onClick: closeSearch, title: "Close (Esc)", style: "flex:none;width:30px;height:30px;border-radius:8px;border:1px solid rgba(255,255,255,0.1);background:rgba(255,255,255,0.04);display:flex;align-items:center;justify-content:center;cursor:pointer" }, icon("x", 15, 0.7))),
+    h("div", { "data-keep-scroll": "search", style: "overflow-y:auto;flex:1;min-height:0" }, body));
+
+  return h("div", { onClick: closeSearch, style: "position:fixed;inset:0;z-index:60;background:rgba(6,7,9,0.62);backdrop-filter:blur(3px);animation:aerFadeIn .15s ease" }, panel);
 }
 
 // Toggle: only channels with guide data vs every channel.
@@ -560,6 +658,7 @@ function guideFilterToggle() {
 function togglePreviews() { const next = state.previews === false; try { localStorage.setItem("phospharr.previews", next ? "on" : "off"); } catch { /* private */ } set({ previews: next }); }
 function toggleNetGroup() { const next = state.networkGroup === false; try { localStorage.setItem("phospharr.netgroup", next ? "on" : "off"); } catch { /* private */ } set({ networkGroup: next, selectedCellId: null }); }
 function toggleAmbient() { const next = !(state.ambient !== false); try { localStorage.setItem("phospharr.ambient", next ? "on" : "off"); } catch { /* private */ } set({ ambient: next }); }
+function toggleFavoritesOnly() { set({ favoritesOnly: !state.favoritesOnly, selectedCellId: null }); }
 
 // iOS-style on/off pill used in the Guide-options sheet.
 function pillSwitch(on) {
@@ -664,7 +763,11 @@ function guideScreen() {
         const previewsOn = state.previews !== false;
         const previewBtn = h("button", { onClick: togglePreviews, title: previewsOn ? "Live preview on — tap to stop" : "Live preview off — tap to enable", style: "width:36px;height:36px;flex:none;border-radius:9px;border:1px solid " + (previewsOn ? "rgba(84,182,255,0.5)" : "rgba(255,255,255,0.1)") + ";background:" + (previewsOn ? "rgba(84,182,255,0.16)" : "rgba(255,255,255,0.04)") + ";display:flex;align-items:center;justify-content:center;cursor:pointer" },
           icon(previewsOn ? "monitor-play" : "monitor-off", 16, previewsOn ? 0.85 : 0.55));
+        const favOn = state.favoritesOnly;
+        const favBtn = h("button", { onClick: toggleFavoritesOnly, title: favOn ? "Showing favorites only" : "Show favorites only", style: "width:36px;height:36px;flex:none;border-radius:9px;border:1px solid " + (favOn ? "rgba(245,196,70,0.6)" : "rgba(255,255,255,0.1)") + ";background:" + (favOn ? "rgba(245,196,70,0.16)" : "rgba(255,255,255,0.04)") + ";display:flex;align-items:center;justify-content:center;cursor:pointer" },
+          icon("star", 16, favOn ? 0.85 : 0.55));
         return h("div", { style: "display:flex;gap:8px;align-items:center;flex-wrap:wrap" },
+          favBtn,
           previewBtn,
           h("button", { onClick: () => set({ guideOptionsOpen: true }), style: "height:36px;padding:0 14px;border-radius:9px;border:1px solid rgba(255,255,255,0.12);background:rgba(255,255,255,0.05);color:#dfe3e7;font-size:13px;font-weight:600;display:flex;align-items:center;gap:8px;cursor:pointer" },
             icon("sliders-horizontal", 15, 0.8), "Options"),
@@ -673,6 +776,7 @@ function guideScreen() {
       const iconBtn = (on, iconName, title, onClick) => h("button", { onClick, title, style: "width:36px;height:36px;border-radius:9px;border:1px solid " + (on ? "rgba(84,182,255,0.5)" : "rgba(255,255,255,0.1)") + ";background:" + (on ? "rgba(84,182,255,0.16)" : "rgba(255,255,255,0.04)") + ";display:flex;align-items:center;justify-content:center;cursor:pointer" },
         icon(iconName, 16, on ? 0.85 : 0.55));
       return h("div", { style: "display:flex;gap:8px;align-items:center;flex-wrap:wrap;justify-content:flex-end" },
+        iconBtn(state.favoritesOnly, "star", state.favoritesOnly ? "Showing favorites only — click for all channels" : "Show favorites only (" + favoriteCount() + " starred)", toggleFavoritesOnly),
         iconBtn(state.previews !== false, state.previews !== false ? "monitor-play" : "monitor-off", state.previews !== false ? "Live preview on — click to stop background video" : "Live preview off — click to enable", togglePreviews),
         iconBtn(state.networkGroup !== false, "layers", "Group network affiliates (collapse local stations into one row)", toggleNetGroup),
         iconBtn(state.ambient !== false, "clapperboard", "Ambient backdrop", toggleAmbient),
@@ -729,7 +833,15 @@ function guideScreen() {
   // Virtualized rows: only the rows in (and near) the viewport are in the DOM.
   // header/now-line/now-dot are the first 3 children and are kept across slices.
   const inner = h("div", { style: { width: COLW + totalW + "px", height: HEADH + rowsH + "px", position: "relative" } }, headerRow, nowLine, nowDot);
-  const scroller = h("div", { id: "aerGuideScroll", style: "flex:1;min-height:0;overflow:auto" + (ambient ? ";position:relative;z-index:2;background:" + scrollerAmbientBg + ";backdrop-filter:blur(22px);-webkit-backdrop-filter:blur(22px)" : "") }, inner);
+  // Favorites filter with nothing starred → a friendly nudge instead of a blank grid.
+  const emptyFav = (state.favoritesOnly && visible.length === 0)
+    ? h("div", { style: "position:sticky;left:0;top:0;max-width:100%;padding:54px 24px 24px;display:flex;flex-direction:column;align-items:center;gap:11px;text-align:center;color:#9aa0a6" },
+        icon("star", 30, 0.5),
+        h("div", { style: "font-size:15.5px;font-weight:700;color:#dfe3e7" }, "No favorites yet"),
+        h("div", { style: "font-size:13px;max-width:330px;line-height:1.5" }, "Open a channel and tap the ★ to add it. Favorites get their own filter here and a row on the Home screen."),
+        h("button", { onClick: toggleFavoritesOnly, style: "margin-top:4px;height:34px;padding:0 16px;border-radius:9px;border:1px solid rgba(255,255,255,0.14);background:rgba(255,255,255,0.05);color:#dfe3e7;font-size:13px;font-weight:600;cursor:pointer" }, "Show all channels"))
+    : null;
+  const scroller = h("div", { id: "aerGuideScroll", style: "flex:1;min-height:0;overflow:auto" + (ambient ? ";position:relative;z-index:2;background:" + scrollerAmbientBg + ";backdrop-filter:blur(22px);-webkit-backdrop-filter:blur(22px)" : "") }, inner, emptyFav || h("span", { style: "display:none" }));
 
   let lastStart = -1, lastEnd = -1, scrollRaf = 0;
   const renderSlice = () => {
@@ -866,7 +978,12 @@ function detailPane(ambient) {
   const shareBtn = (state.auth.user && state.auth.user.role === "admin")
     ? h("button", { title: "Create a share link", style: "pointer-events:auto;width:" + btnSize + "px;height:" + btnSize + "px;border-radius:12px;border:1px solid rgba(255,255,255,0.18);background:rgba(8,10,12,0.55);cursor:pointer;display:flex;align-items:center;justify-content:center;backdrop-filter:blur(6px)", onClick: (e) => { e.stopPropagation(); openShareDialog(ch.id); } }, icon("share-2", mob ? 16 : 18, 0.9))
     : null;
-  const watchBtn = h("div", { style: "display:flex;gap:10px;align-self:flex-start;margin-top:" + (mob ? "2px" : "6px") + ";pointer-events:auto" }, fsBtn, shareBtn);
+  // Star this channel. Gold-filled when favorited; the Favorites guide filter and
+  // the Home favorites row both read the same isFavorite flag.
+  const fav = ch.isFavorite;
+  const favBtn = h("button", { title: fav ? "Remove from Favorites" : "Add to Favorites", style: "pointer-events:auto;width:" + btnSize + "px;height:" + btnSize + "px;border-radius:12px;border:1px solid " + (fav ? "rgba(245,196,70,0.7)" : "rgba(255,255,255,0.18)") + ";background:" + (fav ? "rgba(245,196,70,0.92)" : "rgba(8,10,12,0.55)") + ";cursor:pointer;display:flex;align-items:center;justify-content:center;backdrop-filter:blur(6px)", onClick: (e) => { e.stopPropagation(); toggleFavorite(ch); } },
+    icon("star", mob ? 16 : 18, fav ? 0.05 : 0.9));
+  const watchBtn = h("div", { style: "display:flex;gap:10px;align-self:flex-start;margin-top:" + (mob ? "2px" : "6px") + ";pointer-events:auto" }, fsBtn, favBtn, shareBtn);
   // Mute button with a hover-reveal vertical volume rocker (popup to its left).
   const muteToggle = (extra) => {
     const muted = state.detailMuted;
@@ -1802,6 +1919,13 @@ function render() {
   // toggling something deep in a list doesn't fling you back to the top.
   const scrollSnap = {};
   for (const el of root.querySelectorAll("[data-keep-scroll]")) scrollSnap[el.getAttribute("data-keep-scroll")] = [el.scrollLeft, el.scrollTop];
+  // A full re-render rebuilds inputs as new nodes, dropping focus + caret. For
+  // live-filter fields (search, category filter) that means typing dies after one
+  // key. Snapshot the focused [data-focus-key] field and restore it afterwards.
+  const fa = document.activeElement;
+  const focusSnap = fa && fa.getAttribute && fa.getAttribute("data-focus-key")
+    ? { key: fa.getAttribute("data-focus-key"), start: fa.selectionStart, end: fa.selectionEnd }
+    : null;
   root.replaceChildren(
     topBar(),
     body,
@@ -1809,10 +1933,15 @@ function render() {
     promoteOverlay() || h("div", { style: "display:none" }),
     sourceModal() || h("div", { style: "display:none" }),
     shareModal() || h("div", { style: "display:none" }),
+    searchOverlay() || h("div", { style: "display:none" }),
   );
   for (const el of root.querySelectorAll("[data-keep-scroll]")) {
     const s = scrollSnap[el.getAttribute("data-keep-scroll")];
     if (s) { el.scrollLeft = s[0]; el.scrollTop = s[1]; }
+  }
+  if (focusSnap) {
+    const el = root.querySelector('[data-focus-key="' + focusSnap.key + '"]');
+    if (el) { el.focus(); try { if (focusSnap.start != null) el.setSelectionRange(focusSnap.start, focusSnap.end); } catch { /* non-text input */ } }
   }
   reconcileTiles(); // tear down any tile player no longer on screen
 }
@@ -1973,7 +2102,7 @@ function categoryManager(cats) {
   const totalHidden = cats.filter((c) => c.hidden).length;
 
   const search = h("div", { style: "padding:12px 16px;display:flex;align-items:center;gap:10px;border-bottom:1px solid rgba(255,255,255,0.05)" },
-    h("input", { value: state.catSearch, placeholder: "Filter " + cats.length + " categories…",
+    h("input", { value: state.catSearch, placeholder: "Filter " + cats.length + " categories…", "data-focus-key": "catSearch",
       onInput: (e) => { state.catSearch = e.target.value; render(); },
       style: "flex:1;height:34px;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.1);border-radius:8px;padding:0 11px;color:#e6e9ec;font-size:13px;font-family:inherit;outline:none" }),
     h("span", { style: "font-size:11.5px;color:#7e858c;white-space:nowrap" }, totalHidden + " hidden"));
@@ -2880,9 +3009,21 @@ function navGuide(key) {
 document.addEventListener("keydown", (e) => {
   if (playerEl || state.addOpen) return; // fullscreen / modal handle their own keys
   if (state.screen !== "guide") return;
+  if (state.searchOpen) return; // search has its own key handling
   if (!["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Enter"].includes(e.key)) return;
   e.preventDefault();
   navGuide(e.key);
+});
+
+// "/" (or Ctrl/⌘-K) opens search from anywhere; Esc closes it. Ignored while
+// typing in a field, in the fullscreen player, or with another modal open.
+document.addEventListener("keydown", (e) => {
+  if (state.searchOpen && e.key === "Escape") { e.preventDefault(); closeSearch(); return; }
+  if (!state.auth || !state.auth.user || state.searchOpen || playerEl) return;
+  const t = e.target;
+  const typing = t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable);
+  if (typing) return;
+  if (e.key === "/" || ((e.metaKey || e.ctrlKey) && (e.key === "k" || e.key === "K"))) { e.preventDefault(); openSearch(); }
 });
 
 // ===== inline tile players (mosaic tiles + guide mini-preview) =====
