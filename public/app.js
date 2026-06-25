@@ -1492,7 +1492,7 @@ function settingsScreen() {
           settingRow({ title: "Browser audio transcode", desc: "Convert AC-3 → AAC so those channels play in-browser (needs ffmpeg).", key: "features.transcode", type: "toggle" }),
           settingRow({ title: "EPG auto-refresh", desc: "Pull the guide on a schedule so it stays current.", key: "features.epgAutoRefresh", type: "toggle" }),
           settingRow({ title: "Health probing", desc: "Probe streams to show real Live / SD / Dead badges.", key: "features.healthProbe", type: "toggle" }),
-          settingRow({ title: "Timeshift (pause / rewind)", desc: "Keep a rolling on-disk buffer so you can pause and rewind live TV.", key: "features.timeshift", type: "toggle" }),
+          settingRow({ title: "Timeshift (pause / rewind)", desc: "Keep a rolling buffer of each channel you watch so you can pause and rewind live TV.", key: "features.timeshift", type: "toggle" }),
           settingRow({ title: "DVR recordings", desc: "Record programs to disk and build a recordings library.", key: "features.dvr", type: "toggle" })),
         (dvrOn || tsOn)
           ? settingsSection("STORAGE & RETENTION",
