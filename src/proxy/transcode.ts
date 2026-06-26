@@ -38,7 +38,7 @@ function resolveFfmpeg(): string {
   return "ffmpeg";
 }
 
-const FFMPEG = resolveFfmpeg();
+export const FFMPEG = resolveFfmpeg();
 console.log(`[transcode] ffmpeg: ${FFMPEG}`);
 
 // video copy (no re-encode) · AC-3/whatever → stereo AAC · remux to MPEG-TS on stdout

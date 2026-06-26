@@ -13,6 +13,8 @@ import { applyRules } from "../rules/engine.ts";
 import { reconcileAutoHides, listCategories, listProviderCategories } from "../content/filter.ts";
 import { muxer } from "../proxy/muxer.ts";
 import { timeshift } from "../proxy/timeshift.ts";
+import { mosaic } from "../proxy/mosaic.ts";
+import { keyframeAlignedStream } from "../proxy/tsfeed.ts";
 import { transcoder } from "../proxy/transcode.ts";
 import { pool } from "../scheduler/pool.ts";
 import * as hdhr from "../tuner/hdhr.ts";
@@ -73,6 +75,11 @@ app.get("/", () => new Response(Bun.file(`${publicDir}/index.html`), { headers: 
 app.get("/app.js", () => new Response(Bun.file(`${publicDir}/app.js`), { headers: { "Content-Type": "text/javascript", "Cache-Control": noStore } }));
 app.get("/vendor/mpegts.js", () =>
   new Response(Bun.file(`${publicDir}/vendor/mpegts.js`), {
+    headers: { "Content-Type": "text/javascript", "Cache-Control": "max-age=86400" },
+  }),
+);
+app.get("/vendor/hls.js", () =>
+  new Response(Bun.file(`${publicDir}/vendor/hls.js`), {
     headers: { "Content-Type": "text/javascript", "Cache-Control": "max-age=86400" },
   }),
 );
@@ -335,6 +342,39 @@ app.get("/api/timeshift/:channelId", (c) => {
   const channelId = Number(c.req.param("channelId"));
   if (!Number.isFinite(channelId)) return c.json({ error: "bad id" }, 400);
   return c.json({ windowSec: timeshift.windowSec(channelId), enabled: !!cachedSetting("features.timeshift") });
+});
+
+// Internal keyframe-aligned feed the mosaic compositor pulls (so each ffmpeg
+// input starts decoding at a clean keyframe instead of waiting/stalling mid-GOP).
+app.get("/mosaicfeed/:channelId", async (c) => {
+  const channelId = Number(c.req.param("channelId"));
+  if (!Number.isFinite(channelId)) return c.text("bad channel id", 400);
+  const auth = streamAuth(c);
+  if (!auth.ok) return c.text("unauthorized", auth.status ?? 401);
+  const body = await muxer.open(channelId, c.req.raw.signal);
+  if (!body) return c.text("no playable source", 503);
+  return new Response(keyframeAlignedStream(body), { headers: STREAM_HEADERS });
+});
+
+// ─── Mosaic combined stream: composite several channels into one castable HLS ───
+app.get("/api/mosaic/status", (c) => c.json(mosaic.status()));
+app.post("/api/mosaic/start", async (c) => {
+  const body = (await c.req.json().catch(() => ({}))) as { channels?: number[]; cols?: number; audio?: number };
+  const channels = (body.channels ?? []).map(Number).filter((n) => Number.isFinite(n));
+  if (channels.length < 2 || channels.length > 9) return c.json({ error: "need 2–9 channels" }, 400);
+  const cols = body.cols === 3 ? 3 : 2;
+  const out = mosaic.start(channels, cols, Number(body.audio) || 0);
+  // The cast/play URL carries the stream key so a dumb device can fetch it too.
+  return c.json({ ...out, key: String(cachedSetting("access.streamKey") || "") });
+});
+app.post("/api/mosaic/stop", (c) => { mosaic.stop(); return c.json({ ok: true }); });
+// Serve the live HLS playlist + segments (session cookie, or ?key= for devices).
+app.get("/mosaic/:file", (c) => {
+  const auth = streamAuth(c);
+  if (!auth.ok) return c.text("unauthorized", auth.status ?? 401);
+  const f = mosaic.file(c.req.param("file"));
+  if (!f) return c.text("not found", 404);
+  return new Response(f.body, { headers: { "Content-Type": f.type, "Cache-Control": "no-cache, no-store" } });
 });
 
 // ─── Exports under /t/<stream key>/ so the key rides every derived URL. Point

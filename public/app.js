@@ -141,6 +141,10 @@ const state = {
   mosaicChannels: loadMosaicChannels(), // per-slot channel ids (user-chosen)
   mosaicPick: null, // slot index whose channel-picker is open (null = closed)
   mosaicPickQ: "", // picker search query
+  mosaicCombined: false, // combined single-stream compositor enabled?
+  mosaicCombinedBusy: false, // start request in flight
+  mosaicCombinedUrl: null, // castable HLS link once started
+  mosaicCombinedErr: null,
   density: "comfortable", // guide row density: 'comfortable' | 'compact'
   guideOnlyWithEpg: true, // guide shows only channels that have program data
   networkGroup: localStorage.getItem("phospharr.netgroup") !== "off", // collapse affiliate clusters into one row
@@ -1185,7 +1189,97 @@ function setMosaicChannel(slot, channelId) {
   state.mosaicChannels = arr;
   saveMosaicChannels();
   set({ mosaicPick: null, mosaicPickQ: "" });
+  if (state.mosaicCombined) startCombined(); // keep the cast stream in sync with the tiles
 }
+
+// ── Combined cast stream (server-composited grid → HLS) ──
+let combinedHls = null;      // hls.js instance for the inline preview
+let combinedVideoEl = null;  // the <video> it's attached to (survives re-render via re-attach)
+let combinedKeepalive = null; // pings the playlist so the encoder isn't idle-reaped while enabled
+// Which non-empty slot currently owns the audio, as an index into the composite.
+function combinedAudioIndex(slots) {
+  const activeSlot = Number((state.activeTileId || "t0").slice(1)) || 0;
+  const ch = slots[activeSlot];
+  const i = ch ? slots.filter(Boolean).indexOf(ch) : 0;
+  return i < 0 ? 0 : i;
+}
+async function startCombined() {
+  const n = state.mosaicLayout === "2x2" ? 4 : 9;
+  const slots = mosaicSlotChannels(n);
+  const live = slots.filter(Boolean);
+  if (live.length < 2) { set({ mosaicCombinedErr: "Pick at least 2 channels first.", mosaicCombined: false }); return; }
+  state.mosaicCombined = true; state.mosaicCombinedBusy = true; state.mosaicCombinedErr = null; render();
+  try {
+    const r = await fetch("/api/mosaic/start", { method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ channels: live.map((c) => c.id), cols: state.mosaicLayout === "3x3" ? 3 : 2, audio: combinedAudioIndex(slots) }) });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) { state.mosaicCombined = false; state.mosaicCombinedBusy = false; state.mosaicCombinedErr = d.error || "Couldn't start the combined stream."; render(); return; }
+    const url = location.origin + d.playlist + (d.key ? "?key=" + encodeURIComponent(d.key) : "");
+    state.mosaicCombinedUrl = url; render();
+    // Keep the encoder warm for as long as the toggle is on, independent of the
+    // inline player — otherwise a slow-to-attach player lets it idle-reap itself.
+    if (combinedKeepalive) clearInterval(combinedKeepalive);
+    combinedKeepalive = setInterval(() => { if (state.mosaicCombined) fetch(location.origin + "/mosaic/index.m3u8", { cache: "no-store" }).catch(() => {}); }, 10000);
+    // Compositing 4 live inputs takes ~20-30s to first segment. Poll the playlist
+    // until it has segments (which also keeps the encoder warm) BEFORE attaching
+    // hls.js — handing it an empty live playlist makes it give up.
+    const ready = await waitForCombined(url);
+    if (!state.mosaicCombined) return; // user turned it off while we waited
+    state.mosaicCombinedBusy = false;
+    if (!ready) { state.mosaicCombinedErr = "Couldn't start in time. It builds fastest with the tiles already playing, and your provider must allow enough simultaneous connections for every tile (this provider allows a limited number)."; render(); return; }
+    render();
+    attachCombinedHls();
+  } catch (e) { state.mosaicCombined = false; state.mosaicCombinedBusy = false; state.mosaicCombinedErr = String(e); render(); }
+}
+// Poll the live playlist until it lists at least one segment (or we give up).
+// Each poll also touches the server so the warming encoder isn't idle-reaped.
+async function waitForCombined(url) {
+  for (let i = 0; i < 22; i++) {
+    if (!state.mosaicCombined) return false;
+    try { const r = await fetch(url, { cache: "no-store" }); if (r.ok && (await r.text()).indexOf("seg_") >= 0) return true; } catch { /* not ready */ }
+    await new Promise((res) => setTimeout(res, 2000));
+  }
+  return false;
+}
+async function stopCombined() {
+  if (combinedKeepalive) { clearInterval(combinedKeepalive); combinedKeepalive = null; }
+  set({ mosaicCombined: false, mosaicCombinedUrl: null, mosaicCombinedErr: null });
+  destroyCombinedHls();
+  try { await fetch("/api/mosaic/stop", { method: "POST" }); } catch { /* ignore */ }
+}
+// Attach (or re-attach across re-renders) the inline HLS preview. Reuses the hls
+// instance so a re-render doesn't trigger a full network reload.
+function attachCombinedHls() {
+  if (state.mosaicCombinedBusy) return; // don't hand hls.js a not-yet-ready playlist — it exhausts retries and sticks
+  const v = document.getElementById("aerCombinedVideo");
+  if (!v || !state.mosaicCombinedUrl) return;
+  if (combinedHls && combinedVideoEl === v) return;
+  // The inline player is same-origin and authenticates by session cookie, so it
+  // uses the KEY-LESS playlist URL — a query string on the playlist confuses
+  // hls.js's relative segment resolution. The ?key= form is only for the
+  // shareable/cast link (devices that don't carry the cookie).
+  const playUrl = location.origin + "/mosaic/index.m3u8";
+  if (window.Hls && Hls.isSupported()) {
+    if (!combinedHls) {
+      combinedHls = new Hls({ liveSyncDurationCount: 3, manifestLoadingMaxRetry: 8, levelLoadingMaxRetry: 8, fragLoadingMaxRetry: 8 });
+      combinedHls.on(Hls.Events.ERROR, (_e, data) => {
+        if (!data || !data.fatal) return;
+        if (data.type === Hls.ErrorTypes.NETWORK_ERROR) { try { combinedHls.startLoad(); } catch { /* noop */ } }
+        else if (data.type === Hls.ErrorTypes.MEDIA_ERROR) { try { combinedHls.recoverMediaError(); } catch { /* noop */ } }
+      });
+      combinedHls.loadSource(playUrl);
+    } else { try { combinedHls.detachMedia(); } catch { /* noop */ } }
+    combinedHls.attachMedia(v);
+    combinedVideoEl = v;
+    v.play().catch(() => {});
+  } else if (v.canPlayType("application/vnd.apple.mpegurl")) {
+    v.src = playUrl; v.play().catch(() => {});
+    combinedVideoEl = v;
+  }
+}
+function destroyCombinedHls() { if (combinedHls) { try { combinedHls.destroy(); } catch { /* noop */ } combinedHls = null; } combinedVideoEl = null; }
+function copyText(t) { try { navigator.clipboard.writeText(t); } catch { /* ignore */ } }
+function setMosaicAudio(id) { set({ activeTileId: id }); if (state.mosaicCombined) startCombined(); }
 
 function mosaicScreen() {
   const n = state.mosaicLayout === "2x2" ? 4 : 9;
@@ -1194,17 +1288,52 @@ function mosaicScreen() {
   const liveN = slots.filter(Boolean).length;
   const seg = (on) => ({ display: "flex", alignItems: "center", height: "30px", padding: "0 14px", borderRadius: "8px", border: "none", background: on ? AC : "transparent", color: on ? "#06121c" : "#aeb4ba", fontSize: "13px", fontWeight: 600, cursor: "pointer", transition: "all .15s" });
 
+  const on = state.mosaicCombined;
+  const combinedBtn = h("button", { onClick: () => (on ? stopCombined() : startCombined()),
+    style: "display:flex;align-items:center;gap:8px;height:36px;padding:0 14px;border-radius:9px;border:1px solid " + (on ? "rgba(84,182,255,0.5)" : "rgba(255,255,255,0.12)") + ";background:" + (on ? "rgba(84,182,255,0.16)" : "rgba(255,255,255,0.05)") + ";color:" + (on ? "#cfe8ff" : "#dfe3e7") + ";font-size:13px;font-weight:600;cursor:pointer" },
+    icon(on ? "square-stack" : "layout-grid", 15, on ? 0.85 : 0.7), on ? "Combined: on" : "Combined stream");
+
   return h("div", { style: "flex:1;display:flex;flex-direction:column;min-height:0" },
     h("div", { style: "flex:none;display:flex;align-items:flex-end;justify-content:space-between;padding:18px 24px 14px;gap:12px;flex-wrap:wrap" },
       h("div", null,
         h("div", { style: "font-size:23px;font-weight:700;letter-spacing:-.01em" }, "Mosaic"),
         h("div", { style: "font-size:13px;color:#7e858c;margin-top:3px" }, `${liveN} live tiles · one audio-active · click a tile's ⤡ to swap channel`)),
-      h("div", { style: "display:flex;padding:3px;background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.08);border-radius:10px;gap:2px" },
-        h("button", { style: seg(state.mosaicLayout === "2x2"), onClick: () => set({ mosaicLayout: "2x2" }) }, "2×2"),
-        h("button", { style: seg(state.mosaicLayout === "3x3"), onClick: () => set({ mosaicLayout: "3x3" }) }, "3×3"))),
+      h("div", { style: "display:flex;align-items:center;gap:10px" },
+        combinedBtn,
+        h("div", { style: "display:flex;padding:3px;background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.08);border-radius:10px;gap:2px" },
+          h("button", { style: seg(state.mosaicLayout === "2x2"), onClick: () => set({ mosaicLayout: "2x2" }) }, "2×2"),
+          h("button", { style: seg(state.mosaicLayout === "3x3"), onClick: () => set({ mosaicLayout: "3x3" }) }, "3×3")))),
+    combinedPanel(),
     h("div", { style: "flex:1;min-height:0;padding:6px 24px 24px" },
       h("div", { style: { display: "grid", gridTemplateColumns: `repeat(${cols},1fr)`, gap: "14px", width: "100%", height: "100%" } },
         ...slots.map((c, i) => mosaicTile(c, i)))));
+}
+
+// The combined-stream bar: an inline HLS preview + the castable link to open on
+// a TV / VLC / Plex. Shown only while the compositor is enabled.
+function combinedPanel() {
+  if (!state.mosaicCombined) return null;
+  const busy = state.mosaicCombinedBusy;
+  const url = state.mosaicCombinedUrl;
+  const err = state.mosaicCombinedErr;
+  const linkRow = url ? h("div", { style: "display:flex;align-items:center;gap:8px;flex:1;min-width:0" },
+    h("input", { value: url, readonly: true, onClick: (e) => e.target.select(),
+      style: "flex:1;min-width:0;height:32px;background:rgba(0,0,0,0.3);border:1px solid rgba(255,255,255,0.12);border-radius:8px;padding:0 10px;color:#cfe8ff;font-family:'JetBrains Mono',monospace;font-size:12px;outline:none" }),
+    h("button", { onClick: () => copyText(url), title: "Copy link", style: "flex:none;height:32px;padding:0 12px;border-radius:8px;border:1px solid rgba(255,255,255,0.14);background:rgba(255,255,255,0.05);color:#dfe3e7;font-size:12.5px;font-weight:600;cursor:pointer" }, "Copy"),
+    h("button", { onClick: () => window.open(url, "_blank"), title: "Open in a new tab", style: "flex:none;height:32px;padding:0 12px;border-radius:8px;border:1px solid rgba(255,255,255,0.14);background:rgba(255,255,255,0.05);color:#dfe3e7;font-size:12.5px;font-weight:600;cursor:pointer" }, "Open")) : null;
+  return h("div", { style: "flex:none;margin:0 24px 6px;padding:13px 15px;border:1px solid rgba(84,182,255,0.25);border-radius:13px;background:rgba(84,182,255,0.06);display:flex;gap:15px;align-items:center;flex-wrap:wrap" },
+    h("div", { style: "position:relative;width:200px;height:112px;flex:none;border-radius:9px;overflow:hidden;background:#000;border:1px solid rgba(255,255,255,0.1)" },
+      h("video", { id: "aerCombinedVideo", autoplay: true, muted: true, playsinline: true, controls: true, style: "width:100%;height:100%;object-fit:contain;background:#000" }),
+      busy ? h("div", { style: "position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:7px;background:rgba(8,10,12,0.7);color:#aeb4ba;font-size:12px;text-align:center;padding:8px" },
+        h("div", { style: "width:20px;height:20px;border:2px solid rgba(255,255,255,0.25);border-top-color:#54b6ff;border-radius:50%;animation:aerSpin .8s linear infinite" }),
+        "Building grid… ~30s") : null),
+    h("div", { style: "flex:1;min-width:240px;display:flex;flex-direction:column;gap:8px" },
+      h("div", { style: "display:flex;align-items:center;gap:9px" },
+        h("span", { style: "font-size:14px;font-weight:700;color:#e6e9ec" }, "Combined cast stream"),
+        h("span", { style: "font-size:10px;font-weight:700;letter-spacing:.1em;color:#9aa0a6;border:1px solid rgba(255,255,255,0.14);border-radius:5px;padding:2px 6px" }, "HLS")),
+      err ? h("div", { style: "font-size:12.5px;color:#ff8079" }, err)
+        : h("div", { style: "font-size:12px;color:#8c9298;line-height:1.45" }, "One stream of all your tiles — open this link on a TV, VLC, Plex, or another device. Audio follows your selected tile; changing tiles rebuilds it."),
+      linkRow));
 }
 
 // Small round control used in a tile's top-right cluster.
@@ -1234,7 +1363,7 @@ function mosaicTile(c, i) {
       h("span", { style: "font-size:9.5px;font-weight:700;letter-spacing:.12em" }, "LIVE")),
     h("div", { style: "position:absolute;top:10px;right:11px;z-index:3;display:flex;gap:7px" },
       tileBtn("repeat", "Change channel", () => openMosaicPick(i), false),
-      tileBtn(active ? "volume-2" : "volume-x", active ? "Audio on" : "Make this the audio tile", () => set({ activeTileId: id }), active)),
+      tileBtn(active ? "volume-2" : "volume-x", active ? "Audio on" : "Make this the audio tile", () => setMosaicAudio(id), active)),
     h("div", { style: "position:absolute;left:0;right:0;bottom:0;z-index:2;padding:14px 13px 12px;background:linear-gradient(180deg,rgba(8,10,12,0),rgba(8,10,12,0.88));display:flex;align-items:flex-end;gap:10px" },
       h("div", { style: "min-width:0;flex:1" },
         h("div", { style: "display:flex;align-items:center;gap:7px;margin-bottom:2px" },
@@ -2091,6 +2220,7 @@ function render() {
     if (el) { el.focus(); try { if (focusSnap.start != null) el.setSelectionRange(focusSnap.start, focusSnap.end); } catch { /* non-text input */ } }
   }
   reconcileTiles(); // tear down any tile player no longer on screen
+  if (state.mosaicCombined && state.mosaicCombinedUrl) attachCombinedHls(); // keep the inline HLS preview attached across re-renders
 }
 
 // ===== actions =====
