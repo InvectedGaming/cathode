@@ -356,14 +356,14 @@ app.get("/mosaicfeed/:channelId", async (c) => {
   return new Response(keyframeAlignedStream(body), { headers: STREAM_HEADERS });
 });
 
-// ─── Mosaic combined stream: composite several channels into one castable HLS ───
+// ─── Mosaic cast: stream the controller's focused channel to a TV / VLC / Plex ───
 app.get("/api/mosaic/status", (c) => c.json(mosaic.status()));
+// Cast a channel (or switch the cast to a new one when the controller refocuses).
 app.post("/api/mosaic/start", async (c) => {
-  const body = (await c.req.json().catch(() => ({}))) as { channels?: number[]; cols?: number; audio?: number };
-  const channels = (body.channels ?? []).map(Number).filter((n) => Number.isFinite(n));
-  if (channels.length < 2 || channels.length > 9) return c.json({ error: "need 2–9 channels" }, 400);
-  const cols = body.cols === 3 ? 3 : 2;
-  const out = mosaic.start(channels, cols, Number(body.audio) || 0);
+  const body = (await c.req.json().catch(() => ({}))) as { channel?: number };
+  const channel = Number(body.channel);
+  if (!Number.isFinite(channel)) return c.json({ error: "channel required" }, 400);
+  const out = mosaic.start(channel);
   // The cast/play URL carries the stream key so a dumb device can fetch it too.
   return c.json({ ...out, key: String(cachedSetting("access.streamKey") || "") });
 });

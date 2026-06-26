@@ -1189,47 +1189,46 @@ function setMosaicChannel(slot, channelId) {
   state.mosaicChannels = arr;
   saveMosaicChannels();
   set({ mosaicPick: null, mosaicPickQ: "" });
-  if (state.mosaicCombined) startCombined(); // keep the cast stream in sync with the tiles
+  recastIfOn(); // keep the cast pointed at the focused channel
 }
 
-// ── Combined cast stream (server-composited grid → HLS) ──
+// ── Cast: stream the focused channel to a TV (follows the controller) ──
 let combinedHls = null;      // hls.js instance for the inline preview
 let combinedVideoEl = null;  // the <video> it's attached to (survives re-render via re-attach)
 let combinedKeepalive = null; // pings the playlist so the encoder isn't idle-reaped while enabled
-// Which non-empty slot currently owns the audio, as an index into the composite.
-function combinedAudioIndex(slots) {
-  const activeSlot = Number((state.activeTileId || "t0").slice(1)) || 0;
-  const ch = slots[activeSlot];
-  const i = ch ? slots.filter(Boolean).indexOf(ch) : 0;
-  return i < 0 ? 0 : i;
+// The channel currently on the stage (what we cast).
+function castChannel() {
+  const slots = mosaicSlotChannels(state.mosaicLayout === "3x3" ? 9 : 4);
+  const fi = focusedStageIndex(slots);
+  return fi >= 0 ? slots[fi] : (slots.find(Boolean) || null);
 }
 async function startCombined() {
-  const n = state.mosaicLayout === "2x2" ? 4 : 9;
-  const slots = mosaicSlotChannels(n);
-  const live = slots.filter(Boolean);
-  if (live.length < 2) { set({ mosaicCombinedErr: "Pick at least 2 channels first.", mosaicCombined: false }); return; }
+  const ch = castChannel();
+  if (!ch) { set({ mosaicCombinedErr: "Pick a channel first.", mosaicCombined: false }); return; }
   state.mosaicCombined = true; state.mosaicCombinedBusy = true; state.mosaicCombinedErr = null; render();
   try {
-    const r = await fetch("/api/mosaic/start", { method: "POST", headers: { "content-type": "application/json" },
-      body: JSON.stringify({ channels: live.map((c) => c.id), cols: state.mosaicLayout === "3x3" ? 3 : 2, audio: combinedAudioIndex(slots) }) });
+    const r = await fetch("/api/mosaic/start", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ channel: ch.id }) });
     const d = await r.json().catch(() => ({}));
-    if (!r.ok) { state.mosaicCombined = false; state.mosaicCombinedBusy = false; state.mosaicCombinedErr = d.error || "Couldn't start the combined stream."; render(); return; }
+    if (!r.ok) { state.mosaicCombined = false; state.mosaicCombinedBusy = false; state.mosaicCombinedErr = d.error || "Couldn't start the cast."; render(); return; }
     const url = location.origin + d.playlist + (d.key ? "?key=" + encodeURIComponent(d.key) : "");
     state.mosaicCombinedUrl = url; render();
-    // Keep the encoder warm for as long as the toggle is on, independent of the
-    // inline player — otherwise a slow-to-attach player lets it idle-reap itself.
     if (combinedKeepalive) clearInterval(combinedKeepalive);
     combinedKeepalive = setInterval(() => { if (state.mosaicCombined) fetch(location.origin + "/mosaic/index.m3u8", { cache: "no-store" }).catch(() => {}); }, 10000);
-    // Compositing 4 live inputs takes ~20-30s to first segment. Poll the playlist
-    // until it has segments (which also keeps the encoder warm) BEFORE attaching
-    // hls.js — handing it an empty live playlist makes it give up.
     const ready = await waitForCombined(url);
-    if (!state.mosaicCombined) return; // user turned it off while we waited
+    if (!state.mosaicCombined) return; // turned off while we waited
     state.mosaicCombinedBusy = false;
-    if (!ready) { state.mosaicCombinedErr = "Couldn't start in time. It builds fastest with the tiles already playing, and your provider must allow enough simultaneous connections for every tile (this provider allows a limited number)."; render(); return; }
+    if (!ready) { state.mosaicCombinedErr = "Couldn't start the cast in time — try again."; render(); return; }
     render();
     attachCombinedHls();
   } catch (e) { state.mosaicCombined = false; state.mosaicCombinedBusy = false; state.mosaicCombinedErr = String(e); render(); }
+}
+// When the controller refocuses (or a slot's channel changes) while casting,
+// re-point the cast at the new focused channel — a quick stage restart.
+function recastIfOn() {
+  if (!state.mosaicCombined) return;
+  const ch = castChannel();
+  if (!ch) return;
+  fetch("/api/mosaic/start", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ channel: ch.id }) }).catch(() => {});
 }
 // Poll the live playlist until it lists at least one segment (or we give up).
 // Each poll also touches the server so the warming encoder isn't idle-reaped.
@@ -1279,7 +1278,7 @@ function attachCombinedHls() {
 }
 function destroyCombinedHls() { if (combinedHls) { try { combinedHls.destroy(); } catch { /* noop */ } combinedHls = null; } combinedVideoEl = null; }
 function copyText(t) { try { navigator.clipboard.writeText(t); } catch { /* ignore */ } }
-function setMosaicAudio(id) { set({ activeTileId: id }); if (state.mosaicCombined) startCombined(); }
+function setMosaicAudio(id) { set({ activeTileId: id }); recastIfOn(); }
 
 function mosaicScreen() {
   const isStage = state.mosaicLayout === "stage";
@@ -1292,7 +1291,7 @@ function mosaicScreen() {
   const on = state.mosaicCombined;
   const combinedBtn = h("button", { onClick: () => (on ? stopCombined() : startCombined()),
     style: "display:flex;align-items:center;gap:8px;height:36px;padding:0 14px;border-radius:9px;border:1px solid " + (on ? "rgba(84,182,255,0.5)" : "rgba(255,255,255,0.12)") + ";background:" + (on ? "rgba(84,182,255,0.16)" : "rgba(255,255,255,0.05)") + ";color:" + (on ? "#cfe8ff" : "#dfe3e7") + ";font-size:13px;font-weight:600;cursor:pointer" },
-    icon(on ? "square-stack" : "layout-grid", 15, on ? 0.85 : 0.7), on ? "Combined: on" : "Combined stream");
+    icon(on ? "cast" : "cast", 15, on ? 0.85 : 0.7), on ? "Casting" : "Cast to TV");
 
   return h("div", { style: "flex:1;display:flex;flex-direction:column;min-height:0" },
     h("div", { style: "flex:none;display:flex;align-items:flex-end;justify-content:space-between;padding:18px 24px 14px;gap:12px;flex-wrap:wrap" },
@@ -1392,13 +1391,14 @@ function combinedPanel() {
       h("video", { id: "aerCombinedVideo", autoplay: true, muted: true, playsinline: true, controls: true, style: "width:100%;height:100%;object-fit:contain;background:#000" }),
       busy ? h("div", { style: "position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:7px;background:rgba(8,10,12,0.7);color:#aeb4ba;font-size:12px;text-align:center;padding:8px" },
         h("div", { style: "width:20px;height:20px;border:2px solid rgba(255,255,255,0.25);border-top-color:#54b6ff;border-radius:50%;animation:aerSpin .8s linear infinite" }),
-        "Building grid… ~30s") : null),
+        "Starting cast…") : null),
     h("div", { style: "flex:1;min-width:240px;display:flex;flex-direction:column;gap:8px" },
       h("div", { style: "display:flex;align-items:center;gap:9px" },
-        h("span", { style: "font-size:14px;font-weight:700;color:#e6e9ec" }, "Combined cast stream"),
+        h("span", { style: "font-size:14px;font-weight:700;color:#e6e9ec" }, "Cast to TV"),
+        (castChannel() ? h("span", { style: "font-size:12px;font-weight:600;color:#cfe8ff" }, "· " + castChannel().name) : null),
         h("span", { style: "font-size:10px;font-weight:700;letter-spacing:.1em;color:#9aa0a6;border:1px solid rgba(255,255,255,0.14);border-radius:5px;padding:2px 6px" }, "HLS")),
       err ? h("div", { style: "font-size:12.5px;color:#ff8079" }, err)
-        : h("div", { style: "font-size:12px;color:#8c9298;line-height:1.45" }, "One stream of all your tiles — open this link on a TV, VLC, Plex, or another device. Audio follows your selected tile; changing tiles rebuilds it."),
+        : h("div", { style: "font-size:12px;color:#8c9298;line-height:1.45" }, "Open this link on a TV, VLC, Plex, or another device — it streams whatever channel is on your stage. Focus a different tile and the cast follows."),
       linkRow));
 }
 
