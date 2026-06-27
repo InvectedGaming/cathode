@@ -580,6 +580,28 @@ app.post("/api/vpns/:id/restart", async (c) => {
   return c.json(vpnStatus(id));
 });
 
+// Where does this VPN actually exit? Looks up the public IP/geo *through the
+// tunnel*, so the UI can prove traffic is leaving from the expected country.
+const vpnEgressCache = new Map<number, { at: number; data: unknown }>();
+app.get("/api/vpns/:id/egress", async (c) => {
+  const deny = ensureAdmin(c); if (deny) return deny;
+  const id = Number(c.req.param("id"));
+  const proxy = vpnProxyUrl(id);
+  if (!proxy) return c.json({ ok: false, error: "tunnel is not up" });
+  const hit = vpnEgressCache.get(id);
+  if (hit && Date.now() - hit.at < 30_000) return c.json(hit.data);
+  try {
+    const r = await fetch("http://ip-api.com/json?fields=status,country,countryCode,city,isp,query", { proxy, signal: AbortSignal.timeout(12_000) });
+    const j = (await r.json()) as { status: string; country: string; countryCode: string; city: string; isp: string; query: string };
+    if (j.status !== "success") return c.json({ ok: false, error: "lookup failed" });
+    const data = { ok: true, ip: j.query, country: j.country, countryCode: j.countryCode, city: j.city, org: j.isp };
+    vpnEgressCache.set(id, { at: Date.now(), data });
+    return c.json(data);
+  } catch (e) {
+    return c.json({ ok: false, error: e instanceof Error ? e.message : String(e) });
+  }
+});
+
 // Dry-run a source's credentials/URL WITHOUT saving — returns a preview (channel
 // count, categories, EPG presence) so the user can sanity-check before importing.
 // Categories a single provider contributes to (for per-source management).

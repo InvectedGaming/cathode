@@ -191,6 +191,7 @@ const state = {
   vpnNew: null, // add-VPN form draft, or null when closed
   vpnBusy: false,
   vpnError: null,
+  vpnEgress: {}, // vpnId -> { loading } | { ok, ip, country, countryCode, city, org } | { ok:false, error }
   providerCats: {}, // providerId -> [{category,total,hidden,group}] (per-source category mgmt)
   catOpenProvider: null, // which provider's category panel is open
   catSearch: "", // category manager filter
@@ -2472,6 +2473,20 @@ async function setProviderProxy(p, proxyUrl) {
   await fetch("/api/providers/" + p.id, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ proxyUrl: proxyUrl || null }) }).catch(() => {});
   await loadSources();
 }
+// Country code (e.g. "PL") → flag emoji, for the egress readout.
+function flag(cc) {
+  if (!cc || cc.length !== 2) return "🌐";
+  return String.fromCodePoint(...[...cc.toUpperCase()].map((ch) => 0x1f1e6 - 65 + ch.charCodeAt(0)));
+}
+// Ping a geo-lookup THROUGH the tunnel so the user can see where it exits.
+async function checkEgress(vpnId) {
+  state.vpnEgress[vpnId] = { loading: true }; render();
+  try {
+    const r = await fetch("/api/vpns/" + vpnId + "/egress");
+    state.vpnEgress[vpnId] = r.ok ? await r.json() : { ok: false, error: "request failed" };
+  } catch { state.vpnEgress[vpnId] = { ok: false, error: "request failed" }; }
+  render();
+}
 // A dropdown of Direct / named endpoints / Custom. onPick(url) gets the chosen proxy URL.
 function vpnSelect(current, onPick) {
   const eps = vpnEndpoints();
@@ -2848,6 +2863,19 @@ function providerCard(p) {
       h("div", { style: "display:flex;align-items:center;gap:7px" },
         h("img", { src: ICON("shield-check"), style: "width:15px;height:15px;flex:none;filter:brightness(0) invert(" + (p.proxyUrl ? ".75" : ".5") + ")" }),
         vpnSelect(p.proxyUrl, (url) => setProviderProxy(p, url))),
+      // Verify egress: ping a geo-lookup through the tunnel and show where it exits.
+      (function () {
+        const m = String(p.proxyUrl || "").match(/^vpn:(\d+)$/);
+        if (!m) return null;
+        const vid = Number(m[1]);
+        const eg = state.vpnEgress[vid];
+        return h("div", { style: "display:flex;align-items:center;gap:8px" },
+          h("button", { onClick: () => checkEgress(vid), disabled: !!(eg && eg.loading), style: "height:34px;padding:0 12px;border-radius:8px;border:1px solid rgba(127,220,160,0.3);background:rgba(127,220,160,0.08);color:#7fdca0;font-size:12.5px;font-weight:600;cursor:pointer;font-family:inherit;display:flex;align-items:center;gap:6px" },
+            icon("globe", 14, 0.7), eg && eg.loading ? "Checking…" : "Check IP"),
+          eg && !eg.loading ? (eg.ok
+            ? h("span", { style: "font-size:12.5px;color:#7fdca0;font-family:'JetBrains Mono',monospace" }, flag(eg.countryCode) + " " + eg.ip + " · " + (eg.city ? eg.city + ", " : "") + eg.country)
+            : h("span", { style: "font-size:12px;color:#ff8077" }, "✕ " + (eg.error || "failed"))) : null);
+      })(),
       h("div", { style: "flex:1" }),
       action("Remove", () => deleteProvider(p), { danger: true })),
     catOpen ? h("div", { style: "border-top:1px solid rgba(255,255,255,0.06);margin-top:2px" },
