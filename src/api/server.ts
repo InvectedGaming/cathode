@@ -467,6 +467,13 @@ app.get("/t/:key/stream/:channelId", async (c) => {
   if (!Number.isFinite(channelId)) return c.text("bad channel id", 400);
   return serveStream(c, channelId, false); // a valid tuner key = full lineup access
 });
+// The live mosaic composite, as a tunable channel for HDHR/M3U consumers.
+app.get("/t/:key/mosaic.ts", (c) => {
+  const d = tunerDenied(c); if (d) return d;
+  const body = compositor.open(c.req.raw.signal);
+  if (!body) return c.text("mosaic has no channels selected", 503);
+  return new Response(body, { headers: STREAM_HEADERS });
+});
 // M3U playlist (Jellyfin M3U tuner, TiviMate, …) — stream URLs carry the key path.
 app.get("/t/:key/playlist.m3u", async (c) => {
   const d = tunerDenied(c); if (d) return d;

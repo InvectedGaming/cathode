@@ -1,6 +1,12 @@
 import { and, eq, isNotNull } from "drizzle-orm";
 import { db } from "../db/index.ts";
 import { channels } from "../db/schema.ts";
+import { compositor } from "../proxy/compositor.ts";
+
+// Reserved virtual channel for the live mosaic composite (only listed while the
+// mosaic tab has it running).
+const MOSAIC_NUMBER = 8000;
+const mosaicActive = () => compositor.getState().channels.filter(Boolean).length > 0;
 
 /**
  * HDHomeRun emulation. Makes Phospharr look like an HDHR tuner so Plex, Jellyfin,
@@ -45,12 +51,14 @@ export async function lineup(baseUrl: string) {
     .where(and(eq(channels.isHidden, false), isNotNull(channels.number)))
     .orderBy(channels.number);
 
-  return rows.map((ch) => ({
+  const list = rows.map((ch) => ({
     GuideNumber: String(ch.number),
     GuideName: ch.name,
     URL: `${baseUrl}/stream/${ch.id}`,
     HD: 1,
   }));
+  if (mosaicActive()) list.unshift({ GuideNumber: String(MOSAIC_NUMBER), GuideName: "Mosaic", URL: `${baseUrl}/mosaic.ts`, HD: 1 });
+  return list;
 }
 
 /**
@@ -65,6 +73,10 @@ export async function playlistM3U(baseUrl: string): Promise<string> {
     .where(and(eq(channels.isHidden, false), isNotNull(channels.number)))
     .orderBy(channels.number);
   const out = ["#EXTM3U"];
+  if (mosaicActive()) {
+    out.push(`#EXTINF:-1 tvg-id="phospharr.mosaic" tvg-chno="${MOSAIC_NUMBER}" tvg-name="Mosaic" group-title="Phospharr",Mosaic`);
+    out.push(`${baseUrl}/mosaic.ts`);
+  }
   for (const ch of rows) {
     const tvgId = ch.canonicalId ?? ch.epgChannelId ?? String(ch.id);
     const attrs = [
