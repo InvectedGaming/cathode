@@ -10,18 +10,22 @@ FROM oven/bun:1-debian
 # per-source policy routing; iptables; microsocks is the per-tunnel SOCKS proxy;
 # wireproxy (fetched below) runs WireGuard in userspace. curl/xz fetch ffmpeg.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      openvpn iproute2 iptables ca-certificates curl xz-utils git build-essential \
+      openvpn iproute2 iptables ca-certificates curl gnupg xz-utils git build-essential \
  && rm -rf /var/lib/apt/lists/*
 
-# NVENC-capable ffmpeg. Debian's apt ffmpeg has no nvenc, so drop in a static
-# BtbN GPL build (dlopens libnvidia-encode/libcuda from the toolkit at runtime;
-# falls back to libx264 with no GPU). FFMPEG_PATH below points the app at it.
-RUN curl -fSL --retry 3 -o /tmp/ffmpeg.tar.xz \
-      https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz \
- && mkdir -p /tmp/ff && tar -xJf /tmp/ffmpeg.tar.xz -C /tmp/ff --strip-components=1 \
- && install -m0755 /tmp/ff/bin/ffmpeg /usr/local/bin/ffmpeg \
- && install -m0755 /tmp/ff/bin/ffprobe /usr/local/bin/ffprobe \
- && rm -rf /tmp/ffmpeg.tar.xz /tmp/ff
+# NVENC-capable ffmpeg, MATCHED TO THE HOST DRIVER. The BtbN "latest" build needs
+# NVENC API 13.1 (driver 610+); this host is on 535 (API 12.1). jellyfin-ffmpeg6
+# is built for broad driver compatibility (NVENC 12.x), so it works on 535. It
+# dlopens the NVIDIA libs the container toolkit injects; falls back to libx264 with
+# no GPU. Symlinked into PATH; FFMPEG_PATH points the app at it.
+RUN mkdir -p /etc/apt/keyrings \
+ && curl -fsSL https://repo.jellyfin.org/jellyfin_team.gpg.key | gpg --dearmor -o /etc/apt/keyrings/jellyfin.gpg \
+ && . /etc/os-release \
+ && echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/jellyfin.gpg] https://repo.jellyfin.org/debian ${VERSION_CODENAME} main" > /etc/apt/sources.list.d/jellyfin.list \
+ && apt-get update && apt-get install -y --no-install-recommends jellyfin-ffmpeg6 \
+ && ln -sf /usr/lib/jellyfin-ffmpeg/ffmpeg /usr/local/bin/ffmpeg \
+ && ln -sf /usr/lib/jellyfin-ffmpeg/ffprobe /usr/local/bin/ffprobe \
+ && rm -rf /var/lib/apt/lists/*
 
 # microsocks isn't conveniently packaged — build the tiny single-file proxy.
 RUN git clone --depth 1 https://github.com/rofl0r/microsocks /tmp/microsocks \
