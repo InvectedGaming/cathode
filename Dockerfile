@@ -5,14 +5,37 @@
 # driver-535-compatible jellyfin-ffmpeg6 for bookworm). With a GPU grant in
 # compose + PHOSPHARR_CAST_ENCODER=h264_nvenc, the compositor/transcoder encode
 # on the GPU. Bun is installed directly since we're off the oven/bun image.
+
+# ── Builder: a focused ffmpeg with libzmq + NVENC for the persistent compositor ──
+# jellyfin-ffmpeg has NVENC but no zmq (runtime filter control). We compile one
+# with both — pinned to nv-codec-headers 12.1 (driver 535) and ffmpeg 6.1 (same
+# NVENC era as jellyfin-ffmpeg6) — and ship ONLY the binary as ffmpeg-zmq.
+FROM debian:bookworm AS ffbuilder
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      build-essential nasm pkg-config git curl ca-certificates xz-utils libx264-dev libzmq3-dev \
+ && rm -rf /var/lib/apt/lists/*
+RUN git clone --depth 1 --branch n12.1.14.0 https://github.com/FFmpeg/nv-codec-headers /tmp/nvh \
+ && make -C /tmp/nvh install && rm -rf /tmp/nvh
+RUN curl -fSL https://ffmpeg.org/releases/ffmpeg-6.1.1.tar.xz -o /tmp/ff.tar.xz \
+ && mkdir -p /tmp/ff && tar -xJf /tmp/ff.tar.xz -C /tmp/ff --strip-components=1 \
+ && cd /tmp/ff \
+ && PKG_CONFIG_PATH=/usr/local/lib/pkgconfig ./configure --prefix=/opt/ffzmq \
+      --enable-gpl --enable-version3 --enable-libx264 --enable-libzmq --enable-nvenc \
+      --disable-doc --disable-ffplay --disable-debug \
+ && make -j"$(nproc)" && make install
+
 FROM debian:bookworm-slim
 
 # Native-VPN helpers (openvpn + iproute2 policy routing; iptables; microsocks
 # SOCKS) + tooling (curl/gnupg/unzip for Bun & the jellyfin repo; git/make for
-# microsocks). wireproxy (WireGuard, userspace) is fetched at the end.
+# microsocks) + runtime libs for the compiled ffmpeg-zmq (libzmq5/libx264).
 RUN apt-get update && apt-get install -y --no-install-recommends \
       openvpn iproute2 iptables ca-certificates curl gnupg unzip xz-utils git build-essential \
+      libzmq5 libx264-164 \
  && rm -rf /var/lib/apt/lists/*
+
+# The zmq+NVENC ffmpeg for the persistent compositor (see the builder stage).
+COPY --from=ffbuilder /opt/ffzmq/bin/ffmpeg /usr/local/bin/ffmpeg-zmq
 
 # Bun runtime (official installer → /usr/local/bin/bun).
 RUN curl -fsSL https://bun.sh/install | BUN_INSTALL=/usr/local bash \
