@@ -1232,7 +1232,8 @@ function castState() {
   const ai = Number((state.activeTileId || "t0").slice(1));
   const ach = slots[Number.isFinite(ai) ? ai : 0] || live[0];
   const audio = ach ? Math.max(0, channels.indexOf(ach.id)) : 0;
-  return { channels, focus, audio };
+  const layout = state.mosaicLayout === "3x3" ? "3x3" : state.mosaicLayout === "2up" ? "2up" : "2x2";
+  return { channels, focus, audio, layout };
 }
 
 // ---- in-tab capture path ----
@@ -1304,35 +1305,26 @@ function stopInTabCapture() {
 
 function pushCast() { return fetch("/api/mosaic/cast", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(castState()) }); }
 
+function pushCompose() { return fetch("/api/mosaic/compose", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(castState()) }); }
 async function startCombined() {
   const cs = castState();
-  if (!cs.channels.length) { set({ mosaicCombinedErr: "Pick a channel first.", mosaicCombined: false }); return; }
+  if (!cs.channels.length) { set({ mosaicCombinedErr: "Pick a channel for a tile first.", mosaicCombined: false }); return; }
   state.mosaicCombined = true; state.mosaicCombinedBusy = true; state.mosaicCombinedErr = null; render();
   try {
     const meta = await fetch("/api/mosaic/status").then((r) => r.json()).catch(() => ({}));
-    serverCast = !!meta.serverCast; cap.key = meta.key || "";
-    if (serverCast) {
-      const r = await pushCast();
-      const d = await r.json().catch(() => ({}));
-      if (!r.ok) { state.mosaicCombined = false; state.mosaicCombinedBusy = false; state.mosaicCombinedErr = d.error || "Couldn't start the server cast."; render(); return; }
-    } else {
-      startInTabCapture();
-    }
-    state.mosaicCombinedUrl = location.origin + "/mosaic/index.m3u8" + (cap.key ? "?key=" + encodeURIComponent(cap.key) : "");
-    render();
-    const ready = await waitForCombined(location.origin + "/mosaic/index.m3u8");
-    if (!state.mosaicCombined) return;
-    state.mosaicCombinedBusy = false;
-    if (!ready) { state.mosaicCombinedErr = serverCast ? "Headless renderer didn't produce video — this host likely can't encode (GPU needed)." : "Couldn't start — make sure the tiles are playing."; render(); return; }
-    render(); attachCombinedHls();
-  } catch (e) { state.mosaicCombined = false; state.mosaicCombinedBusy = false; state.mosaicCombinedErr = String(e); render(); }
+    const r = await pushCompose();
+    if (!r.ok) { const d = await r.json().catch(() => ({})); set({ mosaicCombined: false, mosaicCombinedBusy: false, mosaicCombinedErr: d.error || "Couldn't start the mosaic channel." }); return; }
+    const key = meta.key || "";
+    state.mosaicCombinedUrl = location.origin + "/mosaic/live.ts" + (key ? "?key=" + encodeURIComponent(key) : "");
+    state.mosaicCombinedBusy = false; render();
+  } catch (e) { set({ mosaicCombined: false, mosaicCombinedBusy: false, mosaicCombinedErr: String(e) }); }
 }
 // Reflect a focus / audio / channel change. In-tab: the draw loop already reads
 // live state; just refresh the audio gain. Server: debounced push to the renderer.
 function recastIfOn() {
   if (!state.mosaicCombined) return;
-  if (serverCast) { if (castPushTimer) clearTimeout(castPushTimer); castPushTimer = setTimeout(() => { castPushTimer = null; pushCast().catch(() => {}); }, 120); }
-  else updateCapAudio();
+  if (castPushTimer) clearTimeout(castPushTimer);
+  castPushTimer = setTimeout(() => { castPushTimer = null; pushCompose().catch(() => {}); }, 150);
 }
 async function waitForCombined(url) {
   for (let i = 0; i < 22; i++) {
@@ -1345,9 +1337,7 @@ async function waitForCombined(url) {
 async function stopCombined() {
   if (castPushTimer) { clearTimeout(castPushTimer); castPushTimer = null; }
   set({ mosaicCombined: false, mosaicCombinedUrl: null, mosaicCombinedErr: null });
-  if (!serverCast) stopInTabCapture();
-  destroyCombinedHls();
-  try { await fetch("/api/mosaic/stop", { method: "POST" }); } catch { /* ignore */ }
+  try { await fetch("/api/mosaic/compose", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ channels: [] }) }); } catch { /* ignore */ }
 }
 // Attach (or re-attach across re-renders) the inline HLS preview. Reuses the hls
 // instance so a re-render doesn't trigger a full network reload.
@@ -1405,10 +1395,10 @@ function mosaicScreen() {
       h("div", { style: "display:flex;align-items:center;gap:10px" },
         combinedBtn,
         h("div", { style: "display:flex;padding:3px;background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.08);border-radius:10px;gap:2px" },
-          h("button", { style: seg(isStage), onClick: () => set({ mosaicLayout: "stage" }) }, "Stage"),
-          h("button", { style: seg(state.mosaicLayout === "2up"), onClick: () => set({ mosaicLayout: "2up" }) }, "2-up"),
-          h("button", { style: seg(state.mosaicLayout === "2x2"), onClick: () => set({ mosaicLayout: "2x2" }) }, "2×2"),
-          h("button", { style: seg(state.mosaicLayout === "3x3"), onClick: () => set({ mosaicLayout: "3x3" }) }, "3×3")))),
+          h("button", { style: seg(isStage), onClick: () => { set({ mosaicLayout: "stage" }); recastIfOn(); } }, "Stage"),
+          h("button", { style: seg(state.mosaicLayout === "2up"), onClick: () => { set({ mosaicLayout: "2up" }); recastIfOn(); } }, "2-up"),
+          h("button", { style: seg(state.mosaicLayout === "2x2"), onClick: () => { set({ mosaicLayout: "2x2" }); recastIfOn(); } }, "2×2"),
+          h("button", { style: seg(state.mosaicLayout === "3x3"), onClick: () => { set({ mosaicLayout: "3x3" }); recastIfOn(); } }, "3×3")))),
     combinedPanel(),
     isStage
       ? stageView(slots, isMobile())
@@ -1477,31 +1467,27 @@ function stageThumb(c, i, isFocused) {
       h("span", { style: "font-size:12px;font-weight:600;color:#eef0f2;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" }, c.name)));
 }
 
-// The combined-stream bar: an inline HLS preview + the castable link to open on
-// a TV / VLC / Plex. Shown only while the compositor is enabled.
+// The cast bar: the mosaic is live as a server-composited CHANNEL. Shows the
+// tune info + a direct link; mirrors this tab as you change tiles/audio/layout.
 function combinedPanel() {
   if (!state.mosaicCombined) return null;
   const busy = state.mosaicCombinedBusy;
   const url = state.mosaicCombinedUrl;
   const err = state.mosaicCombinedErr;
-  const linkRow = url ? h("div", { style: "display:flex;align-items:center;gap:8px;flex:1;min-width:0" },
+  const linkRow = url ? h("div", { style: "display:flex;align-items:center;gap:8px;flex:1;min-width:0;flex-wrap:wrap" },
     h("input", { value: url, readonly: true, onClick: (e) => e.target.select(),
-      style: "flex:1;min-width:0;height:32px;background:rgba(0,0,0,0.3);border:1px solid rgba(255,255,255,0.12);border-radius:8px;padding:0 10px;color:#cfe8ff;font-family:'JetBrains Mono',monospace;font-size:12px;outline:none" }),
+      style: "flex:1;min-width:180px;height:32px;background:rgba(0,0,0,0.3);border:1px solid rgba(255,255,255,0.12);border-radius:8px;padding:0 10px;color:#cfe8ff;font-family:'JetBrains Mono',monospace;font-size:12px;outline:none" }),
     h("button", { onClick: () => copyText(url), title: "Copy link", style: "flex:none;height:32px;padding:0 12px;border-radius:8px;border:1px solid rgba(255,255,255,0.14);background:rgba(255,255,255,0.05);color:#dfe3e7;font-size:12.5px;font-weight:600;cursor:pointer" }, "Copy"),
-    h("button", { onClick: () => window.open(url, "_blank"), title: "Open in a new tab", style: "flex:none;height:32px;padding:0 12px;border-radius:8px;border:1px solid rgba(255,255,255,0.14);background:rgba(255,255,255,0.05);color:#dfe3e7;font-size:12.5px;font-weight:600;cursor:pointer" }, "Open")) : null;
-  return h("div", { style: "flex:none;margin:0 24px 6px;padding:13px 15px;border:1px solid rgba(84,182,255,0.25);border-radius:13px;background:rgba(84,182,255,0.06);display:flex;gap:15px;align-items:center;flex-wrap:wrap" },
-    h("div", { style: "position:relative;width:200px;height:112px;flex:none;border-radius:9px;overflow:hidden;background:#000;border:1px solid rgba(255,255,255,0.1)" },
-      h("video", { id: "aerCombinedVideo", autoplay: true, muted: true, playsinline: true, controls: true, style: "width:100%;height:100%;object-fit:contain;background:#000" }),
-      busy ? h("div", { style: "position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:7px;background:rgba(8,10,12,0.7);color:#aeb4ba;font-size:12px;text-align:center;padding:8px" },
-        h("div", { style: "width:20px;height:20px;border:2px solid rgba(255,255,255,0.25);border-top-color:#54b6ff;border-radius:50%;animation:aerSpin .8s linear infinite" }),
-        "Starting cast…") : null),
-    h("div", { style: "flex:1;min-width:240px;display:flex;flex-direction:column;gap:8px" },
-      h("div", { style: "display:flex;align-items:center;gap:9px" },
-        h("span", { style: "font-size:14px;font-weight:700;color:#e6e9ec" }, "Cast to TV"),
-        h("span", { style: "font-size:10px;font-weight:700;letter-spacing:.1em;color:#9aa0a6;border:1px solid rgba(255,255,255,0.14);border-radius:5px;padding:2px 6px" }, "HLS")),
-      err ? h("div", { style: "font-size:12.5px;color:#ff8079" }, err)
-        : h("div", { style: "font-size:12px;color:#8c9298;line-height:1.45" }, "Open this link on a TV, VLC, Plex, or another device — it shows the grid (or your focused Stage tile) with the active tile's audio, switching instantly. Keep this tab open and visible. (For tab-free casting on a GPU server, set PHOSPHARR_SERVER_CAST=on.)"),
-      linkRow));
+    h("button", { onClick: () => window.open(url, "_blank"), title: "Open in a new tab (VLC/desktop)", style: "flex:none;height:32px;padding:0 12px;border-radius:8px;border:1px solid rgba(255,255,255,0.14);background:rgba(255,255,255,0.05);color:#dfe3e7;font-size:12.5px;font-weight:600;cursor:pointer" }, "Open")) : null;
+  return h("div", { style: "flex:none;margin:0 24px 6px;padding:13px 15px;border:1px solid rgba(84,182,255,0.25);border-radius:13px;background:rgba(84,182,255,0.06);display:flex;flex-direction:column;gap:9px" },
+    h("div", { style: "display:flex;align-items:center;gap:9px" },
+      busy ? h("div", { style: "width:16px;height:16px;border:2px solid rgba(255,255,255,0.25);border-top-color:#54b6ff;border-radius:50%;animation:aerSpin .8s linear infinite" })
+        : h("span", { style: "width:8px;height:8px;border-radius:50%;background:#2fae5c;box-shadow:0 0 8px #2fae5c" }),
+      h("span", { style: "font-size:14px;font-weight:700;color:#e6e9ec" }, busy ? "Starting mosaic channel…" : "Mosaic is live as a channel"),
+      h("span", { style: "font-size:10px;font-weight:700;letter-spacing:.1em;color:#9aa0a6;border:1px solid rgba(255,255,255,0.14);border-radius:5px;padding:2px 6px" }, "CH 8000")),
+    err ? h("div", { style: "font-size:12.5px;color:#ff8079" }, err)
+      : h("div", { style: "font-size:12px;color:#8c9298;line-height:1.45" }, "Tune “Mosaic” (ch 8000) on your TV via Plex / Jellyfin / Emby / TiviMate — it's in your HDHR lineup + M3U — or open the link below in VLC/desktop. It mirrors this tab live: switch the audio tile, focus a tile, or change layout and the channel follows. Uses one provider slot per tile."),
+    linkRow));
 }
 
 // Small round control used in a tile's top-right cluster.
