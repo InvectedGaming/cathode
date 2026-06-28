@@ -1,5 +1,9 @@
-import { FFMPEG } from "./transcode.ts";
 import { cachedSetting } from "../settings.ts";
+
+// Our compiled ffmpeg with libzmq (runtime filter control) + NVENC, and the
+// zmqsend CLI the app spawns to push live `volume@aN volume X` / overlay commands.
+const FFMPEG = process.env.PHOSPHARR_COMPOSITOR_FFMPEG || "ffmpeg-zmq";
+const ZMQSEND = process.env.PHOSPHARR_ZMQSEND || "zmqsend";
 
 /**
  * Server-side mosaic compositor.
@@ -63,27 +67,21 @@ function buildArgs(state: MosaicState): string[] | null {
   rects.forEach((r, i) => { fc += `[${i}:v]scale=${r.w}:${r.h}:force_original_aspect_ratio=decrease,pad=${r.w}:${r.h}:(ow-iw)/2:(oh-ih)/2,setpts=PTS-STARTPTS,fps=${FPS}[v${i}];`; });
   let last = "bg";
   rects.forEach((r, i) => { const out = i === rects.length - 1 ? "vout" : `o${i}`; fc += `[${last}][v${i}]overlay=${r.x}:${r.y}:eof_action=pass[${out}];`; last = out; });
-  // Re-base each tile's audio PTS to match its 0-based video (the video chain uses
-  // setpts=PTS-STARTPTS). Without this the audio keeps the source's original, large
-  // PTS and runs seconds ahead of the video — the A/V drift on the cast.
-  drawn.forEach((_, i) => { fc += `[${i}:a]asetpts=PTS-STARTPTS[a${i}];`; });
+  // Audio: mix every tile through a NAMED volume filter (active tile = 1, rest = 0),
+  // then an azmq broker. The tab swaps which side you hear by sending the running
+  // ffmpeg `volume@aN volume X` over zmq — INSTANT, no restart. asetpts re-bases
+  // each to the 0-based video so A/V stays in sync.
+  drawn.forEach((_, i) => { fc += `[${i}:a]asetpts=PTS-STARTPTS,volume@a${i}=${i === audioPos ? "1.0" : "0.0"}:eval=frame[av${i}];`; });
+  fc += `${drawn.map((_, i) => `[av${i}]`).join("")}amix=inputs=${drawn.length}:normalize=0:dropout_transition=0[amixpre];[amixpre]azmq[aout];`;
   fc = fc.replace(/;$/, "");
-
-  // Every tile's audio is its own selectable MPEG-TS track, so the viewer swaps
-  // which side they hear INSTANTLY in the player — no re-encode, no re-buffer.
-  // The chosen tile is mapped first (track 0) so it's the default on tune-in.
-  const order = [audioPos, ...drawn.map((_, i) => i).filter((i) => i !== audioPos)];
-  const amaps = order.flatMap((i) => ["-map", `[a${i}]`]);
-  const ameta = order.flatMap((i, t) => [`-metadata:s:a:${t}`, `title=${(state.names && state.names[i]) || "Tile " + (i + 1)}`]);
 
   return [
     "-hide_banner", "-loglevel", "error",
     ...inputs,
     "-filter_complex", fc,
-    "-map", "[vout]", ...amaps,
+    "-map", "[vout]", "-map", "[aout]",
     ...encoderArgs(), "-g", String(FPS), "-bf", "0",
     "-c:a", "aac", "-ac", "2", "-b:a", "128k",
-    ...ameta,
     "-muxdelay", "0", "-muxpreload", "0", "-flush_packets", "1",
     "-f", "mpegts", "-mpegts_flags", "+resend_headers", "pipe:1",
   ];
@@ -107,13 +105,28 @@ class Compositor {
   setState(next: Partial<MosaicState>): void {
     const merged = { ...this.state, ...next };
     // Only the VIDEO layout (channels / grid / focused tile) needs a re-encode.
-    // Audio is multi-track, so switching the audible tile is done in the player —
-    // an audio-only change must NOT restart ffmpeg (that re-buffer/drift was the
-    // cast lag). The audio index still sets the default track on the next restart.
+    // An audio-tile change is just a live gain flip over zmq — no restart, no
+    // re-buffer, no drift: the cast keeps running and the audible side swaps
+    // instantly (the command center).
     const vsig = (s: MosaicState) => JSON.stringify([s.channels, s.layout, s.focus]);
-    const restart = this.subs.size > 0 && vsig(merged) !== vsig(this.state);
+    const videoChanged = vsig(merged) !== vsig(this.state);
+    const audioChanged = merged.audio !== this.state.audio;
     this.state = merged;
-    if (restart) this.restart();
+    if (this.subs.size === 0) return;
+    if (videoChanged) this.restart();
+    else if (audioChanged) this.applyAudio();
+  }
+
+  /** Flip the audible tile on the RUNNING ffmpeg via zmq — instant, no restart. */
+  private applyAudio(): void {
+    if (!this.proc) return;
+    const all = this.state.channels.filter((id): id is number => id != null);
+    if (this.state.focus != null && all[this.state.focus] != null) return; // focus = single tile
+    const audioPos = Math.min(Math.max(0, this.state.audio | 0), all.length - 1);
+    all.forEach((_, i) => {
+      const cmd = `volume@a${i} volume ${i === audioPos ? "1.0" : "0.0"}`;
+      try { Bun.spawn(["bash", "-c", `echo '${cmd}' | timeout 3 ${ZMQSEND}`], { stdout: "ignore", stderr: "ignore" }); } catch { /* best effort */ }
+    });
   }
 
   private restart(): void {
