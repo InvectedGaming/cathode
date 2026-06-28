@@ -44,6 +44,8 @@ export class TsPreroll {
   private gop: Uint8Array[] = []; // packets from the last keyframe (inclusive) to now
   private gopBytes = 0;
   private sawKey = false;
+  private raw = false; // not 188-aligned MPEG-TS → pass everything through untouched
+  private seen = 0;
 
   private parsePat(p: Uint8Array): void {
     const o = psiOffset(p); if (o < 0) return;
@@ -75,12 +77,21 @@ export class TsPreroll {
     return (p[5] & 0x40) !== 0;             // random_access_indicator
   }
 
-  /** Feed a raw upstream chunk. Returns the packet-aligned region to fan out live (or null). */
+  /** Feed a raw upstream chunk. Returns the bytes to fan out live (or null if
+   *  still buffering for alignment). Falls back to raw passthrough for non-TS. */
   push(chunk: Uint8Array): Uint8Array | null {
+    if (this.raw) return chunk; // not MPEG-TS — behave like the old byte-pump
+    this.seen += chunk.length;
     let buf = this.leftover.length ? concat(this.leftover, chunk) : chunk;
     if (!this.aligned) {
       const off = findAlignment(buf);
-      if (off < 0) { this.leftover = buf.length > 4 * PKT ? buf.slice(-2 * PKT) : buf; return null; }
+      if (off < 0) {
+        // Give up looking for TS packet alignment after a while → raw passthrough,
+        // so a non-TS stream streams exactly like it used to (just no fast-start).
+        if (this.seen > 64 * 1024) { this.raw = true; this.leftover = new Uint8Array(0); return buf; }
+        this.leftover = buf.length > 4 * PKT ? buf.slice(-2 * PKT) : buf.slice();
+        return null;
+      }
       buf = buf.subarray(off);
       this.aligned = true;
     }
