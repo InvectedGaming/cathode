@@ -63,13 +63,17 @@ function buildArgs(state: MosaicState): string[] | null {
   rects.forEach((r, i) => { fc += `[${i}:v]scale=${r.w}:${r.h}:force_original_aspect_ratio=decrease,pad=${r.w}:${r.h}:(ow-iw)/2:(oh-ih)/2,setpts=PTS-STARTPTS,fps=${FPS}[v${i}];`; });
   let last = "bg";
   rects.forEach((r, i) => { const out = i === rects.length - 1 ? "vout" : `o${i}`; fc += `[${last}][v${i}]overlay=${r.x}:${r.y}:eof_action=pass[${out}];`; last = out; });
+  // Re-base each tile's audio PTS to match its 0-based video (the video chain uses
+  // setpts=PTS-STARTPTS). Without this the audio keeps the source's original, large
+  // PTS and runs seconds ahead of the video — the A/V drift on the cast.
+  drawn.forEach((_, i) => { fc += `[${i}:a]asetpts=PTS-STARTPTS[a${i}];`; });
   fc = fc.replace(/;$/, "");
 
   // Every tile's audio is its own selectable MPEG-TS track, so the viewer swaps
   // which side they hear INSTANTLY in the player — no re-encode, no re-buffer.
   // The chosen tile is mapped first (track 0) so it's the default on tune-in.
   const order = [audioPos, ...drawn.map((_, i) => i).filter((i) => i !== audioPos)];
-  const amaps = order.flatMap((i) => ["-map", `${i}:a:0?`]);
+  const amaps = order.flatMap((i) => ["-map", `[a${i}]`]);
   const ameta = order.flatMap((i, t) => [`-metadata:s:a:${t}`, `title=${(state.names && state.names[i]) || "Tile " + (i + 1)}`]);
 
   return [
