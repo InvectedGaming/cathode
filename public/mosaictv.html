@@ -84,7 +84,7 @@
     }
 
     function poll() {
-      fetch("/api/mosaic/state?key=" + encodeURIComponent(KEY), { cache: "no-store" })
+      fetch("/mosaic/state?key=" + encodeURIComponent(KEY), { cache: "no-store" })
         .then(function (r) { return r.ok ? r.json() : null; })
         .then(function (s) { if (!s) return; var sig = JSON.stringify(s); if (sig !== lastSig) { lastSig = sig; render(s); } })
         .catch(function () {});

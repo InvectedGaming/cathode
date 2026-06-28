@@ -362,10 +362,10 @@ app.post("/api/mosaic/compose", async (c) => {
   return c.json(compositor.status());
 });
 
-// Shared mosaic state for the TV display page to poll (key-gated so a TV browser
-// can read it without a login). Enriched with channel render info so the display
-// needs nothing else. The controller (the mosaic tab) writes via /compose above.
-app.get("/api/mosaic/state", (c) => {
+// Shared mosaic state for the TV display page to poll. NOT under /api/* (which is
+// session-gated) so a TV browser can read it with just the stream key, like
+// /stream. Enriched with channel render info. Controller writes via /compose above.
+app.get("/mosaic/state", (c) => {
   const auth = streamAuth(c);
   if (!auth.ok) return c.text("unauthorized", auth.status ?? 401);
   const st = compositor.getState();
