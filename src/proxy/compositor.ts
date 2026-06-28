@@ -16,7 +16,9 @@ import { cachedSetting } from "../settings.ts";
  */
 
 const PORT = Number(process.env.PORT ?? 7777);
-const W = 1280, H = 720, FPS = 25;
+// 540p keeps the CPU encode (libx264) comfortably realtime for a multi-tile grid
+// on a shared box — plenty for small tiles. Bump back to 1280x720 once NVENC is in.
+const W = 960, H = 540, FPS = 25;
 
 export type MosaicLayout = "2up" | "2x2" | "3x3";
 export interface MosaicState { channels: number[]; layout: MosaicLayout; focus: number | null; audio: number }
@@ -30,11 +32,12 @@ function encoderArgs(): string[] {
 }
 
 type Cell = { x: number; y: number; w: number; h: number };
-// Tile rectangles within the 1280x720 frame for each layout (16:9 cells, centered).
+// Tile rectangles within the WxH frame for each layout (computed from W/H).
 function cells(layout: MosaicLayout, count: number): Cell[] {
-  if (layout === "2up") { const y = (H - 360) / 2; return [{ x: 0, y, w: 640, h: 360 }, { x: 640, y, w: 640, h: 360 }].slice(0, count); }
+  if (layout === "2up") { const w = Math.floor(W / 2), h = Math.floor(w * 9 / 16), y = Math.floor((H - h) / 2); return [{ x: 0, y, w, h }, { x: w, y, w, h }].slice(0, count); }
   if (layout === "3x3") { const cw = Math.floor(W / 3), ch = Math.floor(H / 3); return Array.from({ length: 9 }, (_, i) => ({ x: (i % 3) * cw, y: Math.floor(i / 3) * ch, w: cw, h: ch })).slice(0, count); }
-  return [{ x: 0, y: 0, w: 640, h: 360 }, { x: 640, y: 0, w: 640, h: 360 }, { x: 0, y: 360, w: 640, h: 360 }, { x: 640, y: 360, w: 640, h: 360 }].slice(0, count); // 2x2
+  const cw = Math.floor(W / 2), ch = Math.floor(H / 2); // 2x2
+  return [{ x: 0, y: 0 }, { x: cw, y: 0 }, { x: 0, y: ch }, { x: cw, y: ch }].map((p) => ({ ...p, w: cw, h: ch })).slice(0, count);
 }
 
 /** Build the ffmpeg args for a state. Returns null if there's nothing to show. */
@@ -49,11 +52,11 @@ function buildArgs(state: MosaicState): string[] | null {
   const rects = focused ? [{ x: 0, y: 0, w: W, h: H }] : cells(state.layout, drawn.length);
   const audioPos = focused ? 0 : Math.min(Math.max(0, state.audio | 0), drawn.length - 1);
 
-  // Feed from /mosaicfeed (keyframe-aligned) not /stream: each tile starts on a
-  // keyframe so ffmpeg can decode immediately instead of waiting a whole GOP for
-  // the first SPS/keyframe — that's what kept first-frame latency high.
+  // Feed each tile from /stream — the muxer now hands out a keyframe-started
+  // preroll, so the extra /mosaicfeed buffering is redundant. Low-latency input
+  // flags + small analyze window keep the composite close to live.
   const inputs: string[] = [];
-  for (const id of drawn) inputs.push("-rw_timeout", "12000000", "-thread_queue_size", "1024", "-analyzeduration", "2000000", "-probesize", "2000000", "-i", `http://127.0.0.1:${PORT}/mosaicfeed/${id}?key=${key}`);
+  for (const id of drawn) inputs.push("-fflags", "nobuffer+genpts", "-flags", "low_delay", "-avioflags", "direct", "-rw_timeout", "12000000", "-thread_queue_size", "512", "-analyzeduration", "1000000", "-probesize", "1000000", "-i", `http://127.0.0.1:${PORT}/stream/${id}?key=${key}`);
 
   // [bg] black clock; each tile scaled+padded into its cell; chained overlays.
   let fc = `color=c=black:s=${W}x${H}:r=${FPS}[bg];`;
@@ -63,12 +66,13 @@ function buildArgs(state: MosaicState): string[] | null {
   fc = fc.replace(/;$/, "");
 
   return [
-    "-hide_banner", "-loglevel", "error", "-fflags", "+genpts",
+    "-hide_banner", "-loglevel", "error",
     ...inputs,
     "-filter_complex", fc,
     "-map", "[vout]", "-map", `${audioPos}:a:0?`,
-    ...encoderArgs(), "-g", String(FPS * 2),
+    ...encoderArgs(), "-g", String(FPS), "-bf", "0",
     "-c:a", "aac", "-ac", "2", "-b:a", "128k",
+    "-muxdelay", "0", "-muxpreload", "0", "-flush_packets", "1",
     "-f", "mpegts", "-mpegts_flags", "+resend_headers", "pipe:1",
   ];
 }
