@@ -52,11 +52,11 @@ function buildArgs(state: MosaicState): string[] | null {
   const rects = focused ? [{ x: 0, y: 0, w: W, h: H }] : cells(state.layout, drawn.length);
   const audioPos = focused ? 0 : Math.min(Math.max(0, state.audio | 0), drawn.length - 1);
 
-  // Feed each tile from /stream — the muxer now hands out a keyframe-started
-  // preroll, so the extra /mosaicfeed buffering is redundant. Low-latency input
-  // flags + small analyze window keep the composite close to live.
+  // Feed each tile from /livefeed — the LIVE EDGE, with no keyframe preroll/backlog
+  // (that's only for instant channel-surf). So the composite tracks live (~1-2s)
+  // instead of starting a GOP behind. Low-latency input flags keep buffering tight.
   const inputs: string[] = [];
-  for (const id of drawn) inputs.push("-fflags", "nobuffer+genpts", "-flags", "low_delay", "-avioflags", "direct", "-rw_timeout", "12000000", "-thread_queue_size", "512", "-analyzeduration", "1000000", "-probesize", "1000000", "-i", `http://127.0.0.1:${PORT}/stream/${id}?key=${key}`);
+  for (const id of drawn) inputs.push("-fflags", "nobuffer+genpts", "-flags", "low_delay", "-avioflags", "direct", "-rw_timeout", "12000000", "-thread_queue_size", "512", "-analyzeduration", "1000000", "-probesize", "1000000", "-i", `http://127.0.0.1:${PORT}/livefeed/${id}?key=${key}`);
 
   // [bg] black clock; each tile scaled+padded into its cell; chained overlays.
   let fc = `color=c=black:s=${W}x${H}:r=${FPS}[bg];`;

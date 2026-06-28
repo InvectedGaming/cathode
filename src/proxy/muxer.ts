@@ -94,7 +94,7 @@ class ChannelMux {
     this.teardown();
   }
 
-  attach(sub: Omit<Subscriber, "id">): number {
+  attach(sub: Omit<Subscriber, "id">, sendPreroll = true): number {
     const id = ++this.subSeq;
     this.subs.set(id, { id, ...sub });
     if (this.graceTimer) {
@@ -102,8 +102,9 @@ class ChannelMux {
       this.graceTimer = null;
     }
     // Replay the current GOP (keyframe → now) so this viewer decodes immediately.
-    const pre = this.pre.preroll();
-    if (pre) { try { sub.push(pre); } catch { /* its own stream will detach */ } }
+    // The compositor opts OUT (sendPreroll=false): it wants the live edge, not a GOP
+    // of backlog, so the cast tracks live (~1-2s) instead of starting a GOP behind.
+    if (sendPreroll) { const pre = this.pre.preroll(); if (pre) { try { sub.push(pre); } catch { /* its own stream will detach */ } } }
     return id;
   }
 
@@ -150,7 +151,7 @@ class Muxer {
    * Open a viewer stream for a channel. Returns a ReadableStream (MPEG-TS
    * passthrough) or null if the pool is full / no playable source.
    */
-  async open(channelId: number, signal?: AbortSignal): Promise<ReadableStream<Uint8Array> | null> {
+  async open(channelId: number, signal?: AbortSignal, opts?: { preroll?: boolean }): Promise<ReadableStream<Uint8Array> | null> {
     const selection = await selectStream(channelId);
     if (!selection) return null;
 
@@ -189,7 +190,7 @@ class Muxer {
                 /* already closed */
               }
             },
-          });
+          }, opts?.preroll !== false);
           // Bun fires the request's signal on client disconnect; ReadableStream
           // cancel() alone is unreliable, so detach here too (no phantom viewers).
           if (signal) signal.addEventListener("abort", () => mref.detach(subId), { once: true });

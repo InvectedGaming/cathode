@@ -397,6 +397,17 @@ app.get("/mosaicfeed/:channelId", async (c) => {
   if (!body) return c.text("no playable source", 503);
   return new Response(keyframeAlignedStream(body), { headers: STREAM_HEADERS });
 });
+// Live-edge feed (no keyframe preroll/backlog) — the compositor uses this so the
+// cast tracks live (~1-2s) instead of starting a GOP behind.
+app.get("/livefeed/:channelId", async (c) => {
+  const channelId = Number(c.req.param("channelId"));
+  if (!Number.isFinite(channelId)) return c.text("bad channel id", 400);
+  const auth = streamAuth(c);
+  if (!auth.ok) return c.text("unauthorized", auth.status ?? 401);
+  const body = await muxer.open(channelId, c.req.raw.signal, { preroll: false });
+  if (!body) return c.text("no playable source", 503);
+  return new Response(body, { headers: STREAM_HEADERS });
+});
 
 // ─── Mosaic cast: render the grid → HLS, either in-tab (default) or, with
 // PHOSPHARR_SERVER_CAST set, in a headless browser ON THE SERVER (GPU hosts) ───
