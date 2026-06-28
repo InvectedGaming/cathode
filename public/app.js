@@ -192,6 +192,10 @@ const state = {
   vpnBusy: false,
   vpnError: null,
   vpnEgress: {}, // vpnId -> { loading } | { ok, ip, country, countryCode, city, org } | { ok:false, error }
+  nordCountries: null, // [{id,name,code,cities:[{id,name}]}] for the location picker
+  vpnLocOpen: null, // vpn id whose location picker is open
+  vpnLocDraft: {}, // vpnId -> { countryId, cityId }
+  vpnLocBusy: false,
   providerCats: {}, // providerId -> [{category,total,hidden,group}] (per-source category mgmt)
   catOpenProvider: null, // which provider's category panel is open
   catSearch: "", // category manager filter
@@ -2608,23 +2612,78 @@ async function restartVpn(v) {
   await fetch("/api/vpns/" + v.id + "/restart", { method: "POST" }).catch(() => {});
   await loadVpns();
 }
+async function loadNordCountries() {
+  if (state.nordCountries) return;
+  try { const r = await fetch("/api/nord/countries"); if (r.ok) state.nordCountries = await r.json(); render(); } catch { /* ignore */ }
+}
+function toggleVpnLocation(v) {
+  state.vpnLocOpen = state.vpnLocOpen === v.id ? null : v.id;
+  if (state.vpnLocOpen) loadNordCountries();
+  render();
+}
+async function applyVpnLocation(v) {
+  const d = state.vpnLocDraft[v.id] || {};
+  if (!d.countryId || state.vpnLocBusy) return;
+  state.vpnLocBusy = true; render();
+  try {
+    await fetch("/api/vpns/" + v.id + "/location", { method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ countryId: Number(d.countryId), cityId: d.cityId ? Number(d.cityId) : undefined }) });
+  } catch { /* ignore */ }
+  state.vpnLocBusy = false; state.vpnLocOpen = null;
+  delete state.vpnEgress[v.id]; // exit IP is stale after a move
+  await loadVpns();
+}
+async function duplicateVpn(v) {
+  await fetch("/api/vpns/" + v.id + "/duplicate", { method: "POST" }).catch(() => {});
+  await loadVpns();
+}
 
 // Settings section: list tunnels with live status + an add form.
+function vpnLocationPicker(v) {
+  const countries = state.nordCountries;
+  const d = state.vpnLocDraft[v.id] || (state.vpnLocDraft[v.id] = {});
+  const caret = "position:absolute;right:10px;top:50%;transform:translateY(-50%);pointer-events:none;font-size:8px;color:#9aa0a6";
+  const selStyle = "appearance:none;-webkit-appearance:none;height:34px;padding:0 26px 0 10px;border-radius:8px;border:1px solid rgba(255,255,255,0.12);background:rgba(255,255,255,0.04);color:#e6e9ec;font-size:12.5px;font-family:inherit;cursor:pointer;max-width:220px";
+  if (!countries) return h("div", { style: "padding:0 16px 14px 36px;font-size:12.5px;color:#7e858c" }, "Loading NordVPN locations…");
+  const country = countries.find((c) => String(c.id) === String(d.countryId));
+  return h("div", { style: "padding:2px 16px 14px 36px;display:flex;align-items:center;gap:9px;flex-wrap:wrap" },
+    h("div", { style: "position:relative" },
+      h("select", { onChange: (e) => { d.countryId = e.target.value; d.cityId = ""; render(); }, style: selStyle },
+        h("option", { value: "", selected: !d.countryId, style: "background:#16181c" }, "Country…"),
+        ...countries.map((c) => h("option", { value: String(c.id), selected: String(c.id) === String(d.countryId), style: "background:#16181c" }, c.name))),
+      h("span", { style: caret }, "▾")),
+    country && country.cities.length > 1 ? h("div", { style: "position:relative" },
+      h("select", { onChange: (e) => { d.cityId = e.target.value; render(); }, style: selStyle },
+        h("option", { value: "", selected: !d.cityId, style: "background:#16181c" }, "Best city"),
+        ...country.cities.map((ct) => h("option", { value: String(ct.id), selected: String(ct.id) === String(d.cityId), style: "background:#16181c" }, ct.name))),
+      h("span", { style: caret }, "▾")) : null,
+    h("button", { onClick: () => applyVpnLocation(v), disabled: !d.countryId || state.vpnLocBusy, style: "height:34px;padding:0 14px;border-radius:8px;border:none;background:" + AC + ";color:#06121c;font-size:12.5px;font-weight:700;cursor:" + (d.countryId ? "pointer" : "default") + ";opacity:" + (!d.countryId || state.vpnLocBusy ? 0.6 : 1) }, state.vpnLocBusy ? "Switching…" : "Apply & reconnect"));
+}
 function vpnsRow() {
   const list = state.vpns || [];
   const f = state.vpnNew;
   const stColor = (s) => s === "up" ? "#2fae5c" : s === "starting" ? "#f4b740" : s === "error" ? "#ff5d52" : "#6b7178";
   const stLabel = (s) => s === "up" ? "Connected" : s === "starting" ? "Connecting…" : s === "error" ? "Error" : "Stopped";
   const inputStyle = "width:100%;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.1);border-radius:9px;padding:9px 11px;color:#e6e9ec;font-size:13px;font-family:inherit;outline:none;box-sizing:border-box";
-  const rows = list.map((v) => h("div", { style: "display:flex;align-items:flex-start;gap:11px;padding:12px 16px;border-top:1px solid rgba(255,255,255,0.05)" },
-    h("span", { title: stLabel(v.status), style: "width:9px;height:9px;margin-top:5px;flex:none;border-radius:50%;background:" + stColor(v.status) + ";box-shadow:0 0 7px " + stColor(v.status) }),
-    h("div", { style: "flex:1;min-width:0" },
-      h("div", { style: "display:flex;align-items:center;gap:8px" },
-        h("span", { style: "font-size:14px;font-weight:600;color:#e6e9ec" }, v.name),
-        h("span", { style: "font-size:10px;font-weight:600;letter-spacing:.08em;color:#9aa0a6;border:1px solid rgba(255,255,255,0.12);border-radius:5px;padding:1px 6px;text-transform:uppercase" }, v.kind === "openvpn" ? "OpenVPN" : "WireGuard")),
-      h("div", { style: "font-size:12px;color:" + stColor(v.status) + ";margin-top:2px" }, stLabel(v.status) + (v.error ? " · " + v.error : ""))),
-    h("button", { onClick: () => restartVpn(v), title: "Reconnect", style: "height:30px;padding:0 11px;border-radius:8px;border:1px solid rgba(255,255,255,0.12);background:rgba(255,255,255,0.04);color:#dfe3e7;font-size:12px;font-weight:600;cursor:pointer;flex:none" }, "Reconnect"),
-    h("button", { onClick: () => deleteVpn(v), title: "Remove", style: "width:30px;height:30px;border-radius:8px;border:1px solid rgba(255,93,82,0.3);background:rgba(255,93,82,0.1);display:flex;align-items:center;justify-content:center;cursor:pointer;flex:none" }, icon("trash-2", 14, 0.7))));
+  const smBtn = (active) => "height:30px;padding:0 11px;border-radius:8px;border:1px solid " + (active ? "rgba(84,182,255,0.45)" : "rgba(255,255,255,0.12)") + ";background:" + (active ? "rgba(84,182,255,0.14)" : "rgba(255,255,255,0.04)") + ";color:" + (active ? "#9bd0ff" : "#dfe3e7") + ";font-size:12px;font-weight:600;cursor:pointer;flex:none;display:flex;align-items:center;gap:6px";
+  const rows = list.map((v) => {
+    const locLabel = v.nord ? (v.location || v.server || "—") : null;
+    const flagEmoji = v.nord && v.server ? flag(v.server.slice(0, 2)) : "";
+    return h("div", { style: "border-top:1px solid rgba(255,255,255,0.05)" },
+      h("div", { style: "display:flex;align-items:flex-start;gap:11px;padding:12px 16px" },
+        h("span", { title: stLabel(v.status), style: "width:9px;height:9px;margin-top:5px;flex:none;border-radius:50%;background:" + stColor(v.status) + ";box-shadow:0 0 7px " + stColor(v.status) }),
+        h("div", { style: "flex:1;min-width:0" },
+          h("div", { style: "display:flex;align-items:center;gap:8px;flex-wrap:wrap" },
+            h("span", { style: "font-size:14px;font-weight:600;color:#e6e9ec" }, v.name),
+            h("span", { style: "font-size:10px;font-weight:600;letter-spacing:.08em;color:#9aa0a6;border:1px solid rgba(255,255,255,0.12);border-radius:5px;padding:1px 6px;text-transform:uppercase" }, v.kind === "openvpn" ? "OpenVPN" : "WireGuard"),
+            v.nord ? h("span", { style: "font-size:11.5px;color:#9aa0a6;display:flex;align-items:center;gap:4px" }, flagEmoji + " " + locLabel) : null),
+          h("div", { style: "font-size:12px;color:" + stColor(v.status) + ";margin-top:2px" }, stLabel(v.status) + (v.error ? " · " + v.error : ""))),
+        v.nord ? h("button", { onClick: () => toggleVpnLocation(v), title: "Change exit location", style: smBtn(state.vpnLocOpen === v.id) }, icon("globe", 14, 0.7), "Location") : null,
+        v.nord ? h("button", { onClick: () => duplicateVpn(v), title: "Duplicate (run another location at once)", style: smBtn(false) }, icon("copy", 13, 0.7)) : null,
+        h("button", { onClick: () => restartVpn(v), title: "Reconnect", style: smBtn(false) }, "Reconnect"),
+        h("button", { onClick: () => deleteVpn(v), title: "Remove", style: "width:30px;height:30px;border-radius:8px;border:1px solid rgba(255,93,82,0.3);background:rgba(255,93,82,0.1);display:flex;align-items:center;justify-content:center;cursor:pointer;flex:none" }, icon("trash-2", 14, 0.7))),
+      state.vpnLocOpen === v.id ? vpnLocationPicker(v) : null);
+  });
 
   const addForm = f ? h("div", { style: "padding:14px 16px;border-top:1px solid rgba(255,255,255,0.05);display:flex;flex-direction:column;gap:10px" },
     h("div", { style: "display:flex;gap:10px" },

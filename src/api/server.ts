@@ -9,6 +9,7 @@ import { fetchM3U } from "../ingest/m3u.ts";
 import { fetchXtream } from "../ingest/xtream.ts";
 import { egress } from "../net/egress.ts";
 import { vpnProxyUrl } from "../net/tunnel.ts";
+import { nordCountries, nordRecommend, isNordConfig, setNordServer, setLocationComment, parseNordInfo } from "../net/nordvpn.ts";
 import { syncEpgFromUrls, nowNext, providerEpgUrls } from "../epg/merge.ts";
 import { applyRules } from "../rules/engine.ts";
 import { reconcileAutoHides, listCategories, listProviderCategories } from "../content/filter.ts";
@@ -521,7 +522,7 @@ app.post("/api/providers", async (c) => {
 // ─── VPNs (admin) — Phospharr dials these itself; no Gluetun. Configs/keys are
 // write-only: they go in but never come back out to the client. ───
 function safeVpn(v: typeof vpns.$inferSelect) {
-  return { id: v.id, name: v.name, kind: v.kind, autostart: v.autostart, createdAt: v.createdAt, ...vpnStatus(v.id) };
+  return { id: v.id, name: v.name, kind: v.kind, autostart: v.autostart, createdAt: v.createdAt, ...vpnStatus(v.id), ...parseNordInfo(v.config) };
 }
 app.get("/api/vpns", (c) =>
   ensureAdmin(c) ?? c.json(db.select().from(vpns).orderBy(vpns.id).all().map(safeVpn)));
@@ -600,6 +601,50 @@ app.get("/api/vpns/:id/egress", async (c) => {
   } catch (e) {
     return c.json({ ok: false, error: e instanceof Error ? e.message : String(e) });
   }
+});
+
+// NordVPN location list (countries + their cities) for the picker.
+app.get("/api/nord/countries", async (c) => {
+  const deny = ensureAdmin(c); if (deny) return deny;
+  try { return c.json(await nordCountries()); }
+  catch { return c.json({ error: "Couldn't reach NordVPN's server list." }, 502); }
+});
+
+// Change where a NordVPN tunnel exits: pick a country (+ optional city), we swap
+// in a recommended OpenVPN-TCP server (same login/certs) and reconnect.
+app.post("/api/vpns/:id/location", async (c) => {
+  const deny = ensureAdmin(c); if (deny) return deny;
+  const id = Number(c.req.param("id"));
+  const v = db.select().from(vpns).where(eq(vpns.id, id)).get();
+  if (!v) return c.json({ error: "not found" }, 404);
+  if (!isNordConfig(v.config)) return c.json({ error: "Location picker only works for NordVPN configs." }, 400);
+  const body = (await c.req.json().catch(() => ({}))) as { countryId?: number; cityId?: number };
+  if (!body.countryId) return c.json({ error: "countryId is required" }, 400);
+  let rec;
+  try { rec = await nordRecommend(Number(body.countryId), body.cityId ? Number(body.cityId) : undefined); }
+  catch { return c.json({ error: "NordVPN lookup failed" }, 502); }
+  if (!rec) return c.json({ error: "No server found for that location." }, 404);
+  const config = setLocationComment(setNordServer(v.config, rec.hostname), rec.label);
+  const [row] = await db.update(vpns).set({ config }).where(eq(vpns.id, id)).returning();
+  vpnEgressCache.delete(id); // exit IP changes with the server
+  stopVpn(id);
+  if (row.autostart) await startVpn(id);
+  return c.json(safeVpn(row));
+});
+
+// Clone a VPN (same config + credentials) so several locations can run at once,
+// each pinned to a different source.
+app.post("/api/vpns/:id/duplicate", async (c) => {
+  const deny = ensureAdmin(c); if (deny) return deny;
+  const id = Number(c.req.param("id"));
+  const v = db.select().from(vpns).where(eq(vpns.id, id)).get();
+  if (!v) return c.json({ error: "not found" }, 404);
+  const [row] = await db.insert(vpns).values({
+    name: `${v.name} copy`, kind: v.kind, config: v.config,
+    username: v.username, password: v.password, autostart: v.autostart, createdAt: new Date(),
+  }).returning();
+  if (row.autostart) await startVpn(row.id);
+  return c.json(safeVpn(row), 201);
 });
 
 // Dry-run a source's credentials/URL WITHOUT saving — returns a preview (channel
