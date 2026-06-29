@@ -97,6 +97,7 @@ class Compositor {
   private seq = 0;
   private state: MosaicState = { channels: [], layout: "2x2", focus: null, audio: 0 };
   private idle: ReturnType<typeof setInterval> | null = null;
+  private warmUntil = 0; // keep the encode alive (no viewers) until this time — pre-warm + reconnect grace
   private lastErr = "";
 
   getState(): MosaicState { return this.state; }
@@ -114,8 +115,12 @@ class Compositor {
     const videoChanged = vsig(merged) !== vsig(this.state);
     const audioChanged = merged.audio !== this.state.audio;
     this.state = merged;
-    if (this.subs.size === 0) return;
-    if (videoChanged) this.restart();
+    if (!buildArgs(this.state)) { this.stop(); return; } // no channels selected → tear down
+    // Pre-warm: start the encode the moment the app composes, BEFORE the TV connects,
+    // so the TV attaches to an already-running stream instead of triggering a cold
+    // 15s provider-dial. Keep it warm for a window so the TV has time to open.
+    this.warmUntil = Date.now() + 45_000;
+    if (videoChanged || !this.proc) this.restart();
     else if (audioChanged) this.applyAudio();
   }
 
@@ -141,6 +146,13 @@ class Compositor {
     void this.pump(proc);
     void this.drain(proc);
     proc.exited.then(() => { if (this.proc === proc) this.proc = null; });
+    this.ensureIdle();
+  }
+
+  /** Idle monitor: tear the encode down only after the keep-warm window with no viewers. */
+  private ensureIdle(): void {
+    if (this.idle) return;
+    this.idle = setInterval(() => { if (this.subs.size === 0 && Date.now() > this.warmUntil) this.stop(); }, 5_000);
   }
 
   private async pump(proc: ReturnType<typeof Bun.spawn>): Promise<void> {
@@ -170,7 +182,7 @@ class Compositor {
   open(signal?: AbortSignal): ReadableStream<Uint8Array> | null {
     if (!buildArgs(this.state)) return null;
     if (!this.proc) this.restart();
-    if (!this.idle) this.idle = setInterval(() => { if (this.subs.size === 0) this.stop(); }, 10_000);
+    this.ensureIdle();
     const id = ++this.seq;
     return new ReadableStream<Uint8Array>({
       start: (controller) => {
@@ -184,7 +196,10 @@ class Compositor {
     }, new ByteLengthQueuingStrategy({ highWaterMark: 16 * 1024 * 1024 }));
   }
 
-  private detach(id: number): void { this.subs.delete(id); if (this.subs.size === 0) this.kill(); }
+  // Keep-warm on last-viewer-leave (don't kill): a mpegts.js reload detaches then
+  // immediately reattaches — killing here would force a fresh 15s cold-start every
+  // reload (the "reconnecting" loop). The idle monitor reaps it after the grace.
+  private detach(id: number): void { this.subs.delete(id); if (this.subs.size === 0) this.warmUntil = Date.now() + 15_000; }
 
   stop(): void {
     this.kill();

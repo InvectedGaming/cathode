@@ -11,54 +11,62 @@
     #msg .sub { font-size: 14px; color: #5c636b; }
     #tap { position: fixed; inset: 0; z-index: 10; display: flex; flex-direction: column; gap: 14px; align-items: center; justify-content: center; background: rgba(4,6,9,.92); color: #dfe3e7; font-size: 22px; cursor: pointer; }
     #tap .play { width: 70px; height: 70px; border-radius: 50%; border: 2px solid #54b6ff; display: flex; align-items: center; justify-content: center; font-size: 30px; color: #54b6ff; }
-    #err { position: fixed; left: 0; right: 0; bottom: 0; z-index: 5; padding: 7px 12px; background: rgba(120,24,24,.82); color: #fff; font-size: 13px; display: none; }
+    #err { position: fixed; left: 0; right: 0; bottom: 0; z-index: 5; padding: 7px 12px; background: rgba(120,24,24,.82); color: #fff; font-size: 13px; font-family: ui-monospace, monospace; display: none; }
   </style>
 </head>
 <body>
   <video id="v" autoplay playsinline></video>
-  <div id="msg"><div>Waiting for the mosaic…</div><div class="sub">pick channels in the app</div></div>
+  <div id="msg"></div>
   <div id="tap"><div class="play">▶</div><div>Tap to start</div></div>
   <div id="err"></div>
   <script src="/vendor/mpegts.js"></script>
   <script>
   (function () {
-    // The SERVER composites the whole grid (layout, focus, and the audible tile —
-    // all controlled from the app's mosaic tab) into ONE MPEG-TS via ffmpeg on the
-    // GPU. The TV just decodes that single H.264+AAC stream — no per-tile client
-    // rendering — so it behaves the same on any browser with Media Source Extensions.
+    // The SERVER composites the whole grid (layout, focus, audible tile — all driven
+    // from the app's mosaic tab) into ONE MPEG-TS via ffmpeg on the GPU. The TV just
+    // decodes that single H.264+AAC stream — no per-tile client rendering — so it
+    // works the same on any browser with Media Source Extensions.
     var KEY = new URLSearchParams(location.search).get("key") || "";
     var v = document.getElementById("v"), msg = document.getElementById("msg"), tap = document.getElementById("tap"), errEl = document.getElementById("err");
     var SRC = "/mosaic/live.ts?key=" + encodeURIComponent(KEY);
-    var player = null, started = false, hasChannels = false, vsig = "", reloadAt = 0;
+    var WAITING = "<div>Waiting for the mosaic…</div><div class='sub'>pick channels in the app</div>";
+    var STARTING = "<div>Starting the mosaic…</div><div class='sub'>first tune can take a few seconds</div>";
+    var player = null, started = false, hasChannels = false, playing = false, vsig = "", reloadAt = 0;
 
     function showErr(t) { errEl.textContent = t || ""; errEl.style.display = t ? "block" : "none"; }
-    function showMsg(on) { msg.style.display = on ? "flex" : "none"; }
+    function showMsg(html) { if (!html) { msg.style.display = "none"; return; } msg.innerHTML = html; msg.style.display = "flex"; }
 
-    function stop() { if (player) { try { player.destroy(); } catch (e) {} player = null; } }
+    v.addEventListener("playing", function () { playing = true; showMsg(0); showErr(""); });
+    v.addEventListener("waiting", function () { if (!playing && started && hasChannels) showMsg(STARTING); });
+
+    function stop() { if (player) { try { player.destroy(); } catch (e) {} player = null; } playing = false; }
     function start() {
       stop();
-      if (!window.mpegts || !mpegts.isSupported()) { showMsg(false); showErr("This browser can't play video (no Media Source Extensions)."); return; }
-      showMsg(false); showErr("");
+      if (!window.mpegts || !mpegts.isSupported()) { showMsg("<div>This browser can't play video</div><div class='sub'>no Media Source Extensions</div>"); return; }
+      showMsg(STARTING); showErr("");
       player = mpegts.createPlayer({ type: "mpegts", isLive: true, url: SRC, withCredentials: false },
-        { enableWorker: true, liveBufferLatencyChasing: true, liveBufferLatencyMaxLatency: 3.0, liveBufferLatencyMinRemain: 0.5, lazyLoad: false, autoCleanupSourceBuffer: true });
+        { enableWorker: true, liveBufferLatencyChasing: true, lazyLoad: false, autoCleanupSourceBuffer: true });
       player.attachMediaElement(v);
-      player.on(mpegts.Events.ERROR, function () { showErr("reconnecting…"); scheduleReload(800); });
+      player.on(mpegts.Events.ERROR, function (type, detail, info) {
+        var d = (info && info.msg) || "";
+        showErr(String(type) + " / " + String(detail) + (d ? " — " + d : ""));
+        // Patient: the first tune cold-dials the provider (can be ~15s). The server
+        // keeps the composite warm across reconnects, so a calm retry reattaches fast.
+        scheduleReload(playing ? 2000 : 5000);
+      });
       player.load();
       v.play().catch(function () {});
     }
-    // Debounced reload: the composite re-encodes (a brief discontinuity) whenever the
-    // app changes layout/focus/channels, so we re-grab a clean keyframe. Audio-tile
-    // swaps don't restart ffmpeg (instant zmq gain flip), so they need no reload.
     function scheduleReload(delay) {
-      var when = Date.now() + (delay || 600);
+      var when = Date.now() + delay;
       if (reloadAt && reloadAt <= when) return;
       reloadAt = when;
-      setTimeout(function () { reloadAt = 0; if (started && hasChannels) start(); }, delay || 600);
+      setTimeout(function () { reloadAt = 0; if (started && hasChannels) start(); }, delay);
     }
 
     tap.addEventListener("click", function () {
       started = true; tap.style.display = "none"; v.muted = false;
-      if (hasChannels) start(); else showMsg(true);
+      if (hasChannels) start(); else showMsg(WAITING);
     });
 
     function poll() {
@@ -68,12 +76,12 @@
           if (!s) return;
           var tiles = s.tiles || [];
           hasChannels = tiles.length > 0;
-          if (!hasChannels) { stop(); if (started) showMsg(true); return; }
+          if (!hasChannels) { stop(); if (started) showMsg(WAITING); return; }
           // Restart only when the VIDEO layout changes (ffmpeg re-encodes); audio swaps are seamless.
           var sig = JSON.stringify([tiles.map(function (t) { return t.id; }), s.layout, s.focus]);
           if (started) {
-            if (!player) { start(); }
-            else if (sig !== vsig) { scheduleReload(300); }
+            if (!player) start();
+            else if (sig !== vsig && playing) scheduleReload(300);
           }
           vsig = sig;
         })
