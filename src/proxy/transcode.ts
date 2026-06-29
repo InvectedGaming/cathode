@@ -44,7 +44,13 @@ console.log(`[transcode] ffmpeg: ${FFMPEG}`);
 // video copy (no re-encode) · AC-3/whatever → stereo AAC · remux to MPEG-TS on stdout
 const FFMPEG_ARGS = [
   "-hide_banner", "-loglevel", "error",
-  "-fflags", "+genpts",
+  // Low-latency input: ffmpeg's default probesize/analyzeduration (5MB/5s) makes it
+  // sit ~5s before emitting a frame — a long black gap on the player when a tile
+  // falls back to /watch. The muxer feed is a clean single-program TS that starts on
+  // a keyframe, so a small probe is plenty; this drops first-byte from ~5.7s to ~1s.
+  "-fflags", "nobuffer+genpts",
+  "-flags", "low_delay",
+  "-analyzeduration", "1000000", "-probesize", "1000000",
   "-i", "pipe:0",
   "-map", "0:v:0", "-map", "0:a:0?",
   "-c:v", "copy",
