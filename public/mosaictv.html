@@ -6,106 +6,80 @@
   <title>Phospharr · Mosaic TV</title>
   <style>
     html, body { margin: 0; height: 100%; background: #000; overflow: hidden; font-family: system-ui, -apple-system, sans-serif; }
-    #grid { position: fixed; inset: 0; display: grid; gap: 2px; background: #000; }
-    .tile { position: relative; background: #0a0c0f; overflow: hidden; min-width: 0; min-height: 0; }
-    .tile video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; background: #000; }
-    .tile .lbl { position: absolute; left: 0; right: 0; bottom: 0; z-index: 2; padding: 10px 13px; background: linear-gradient(transparent, rgba(0,0,0,.82)); color: #fff; font-size: 15px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-    .tile .au { position: absolute; top: 9px; right: 9px; z-index: 2; padding: 3px 8px; border-radius: 7px; background: rgba(84,182,255,.9); color: #06121c; font-size: 12px; font-weight: 700; display: none; }
-    .tile.audio { box-shadow: inset 0 0 0 3px #54b6ff; }
-    .tile.audio .au { display: block; }
-    #msg { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; color: #6b7178; font-size: 20px; text-align: center; padding: 24px; }
-    #tap { position: fixed; inset: 0; z-index: 10; display: flex; flex-direction: column; gap: 14px; align-items: center; justify-content: center; background: rgba(4,6,9,.9); color: #dfe3e7; font-size: 22px; cursor: pointer; }
+    #v { position: fixed; inset: 0; width: 100%; height: 100%; object-fit: contain; background: #000; }
+    #msg { position: fixed; inset: 0; z-index: 4; display: none; align-items: center; justify-content: center; flex-direction: column; gap: 10px; color: #8a9099; font-size: 20px; text-align: center; padding: 24px; }
+    #msg .sub { font-size: 14px; color: #5c636b; }
+    #tap { position: fixed; inset: 0; z-index: 10; display: flex; flex-direction: column; gap: 14px; align-items: center; justify-content: center; background: rgba(4,6,9,.92); color: #dfe3e7; font-size: 22px; cursor: pointer; }
     #tap .play { width: 70px; height: 70px; border-radius: 50%; border: 2px solid #54b6ff; display: flex; align-items: center; justify-content: center; font-size: 30px; color: #54b6ff; }
+    #err { position: fixed; left: 0; right: 0; bottom: 0; z-index: 5; padding: 7px 12px; background: rgba(120,24,24,.82); color: #fff; font-size: 13px; display: none; }
   </style>
 </head>
 <body>
-  <div id="grid"></div>
-  <div id="msg">Waiting for the mosaic… pick channels in the app.</div>
-  <div id="tap"><div class="play">▶</div><div>Tap to start the mosaic</div></div>
+  <video id="v" autoplay playsinline></video>
+  <div id="msg"><div>Waiting for the mosaic…</div><div class="sub">pick channels in the app</div></div>
+  <div id="tap"><div class="play">▶</div><div>Tap to start</div></div>
+  <div id="err"></div>
   <script src="/vendor/mpegts.js"></script>
   <script>
   (function () {
+    // The SERVER composites the whole grid (layout, focus, and the audible tile —
+    // all controlled from the app's mosaic tab) into ONE MPEG-TS via ffmpeg on the
+    // GPU. The TV just decodes that single H.264+AAC stream — no per-tile client
+    // rendering — so it behaves the same on any browser with Media Source Extensions.
     var KEY = new URLSearchParams(location.search).get("key") || "";
-    var grid = document.getElementById("grid"), msg = document.getElementById("msg"), tap = document.getElementById("tap");
-    var players = {}; // channelId -> { video, player, tileEl, lbl }
-    var lastSig = "", started = false, lastState = null;
+    var v = document.getElementById("v"), msg = document.getElementById("msg"), tap = document.getElementById("tap"), errEl = document.getElementById("err");
+    var SRC = "/mosaic/live.ts?key=" + encodeURIComponent(KEY);
+    var player = null, started = false, hasChannels = false, vsig = "", reloadAt = 0;
 
-    // /stream is raw passthrough; if the browser can't decode it (AC-3 audio / HEVC),
-    // fall back to /watch, which the server transcodes to AAC + H.264. Same logic the
-    // main app uses — without it, AC-3 channels show black + silent.
-    function startMpegts(e, id, transcode) {
-      if (e.player) { try { e.player.destroy(); } catch (x) {} e.player = null; }
-      if (!window.mpegts || !mpegts.isSupported()) return;
-      var url = (transcode ? "/watch/" : "/stream/") + id + "?key=" + encodeURIComponent(KEY);
-      var p = mpegts.createPlayer({ type: "mpegts", isLive: true, url: url, withCredentials: false },
-        { enableWorker: true, liveBufferLatencyChasing: true, lazyLoad: false, autoCleanupSourceBuffer: true });
-      e.player = p; p.attachMediaElement(e.video);
-      p.on(mpegts.Events.ERROR, function (t, detail, info) {
-        var codec = String(detail).indexOf("MSE") >= 0 || /codec|unsupported|addSourceBuffer/i.test((info && info.msg) || "");
-        if (!transcode && codec && players[id]) startMpegts(e, id, true);
-      });
-      p.load(); e.video.play().catch(function () {});
+    function showErr(t) { errEl.textContent = t || ""; errEl.style.display = t ? "block" : "none"; }
+    function showMsg(on) { msg.style.display = on ? "flex" : "none"; }
+
+    function stop() { if (player) { try { player.destroy(); } catch (e) {} player = null; } }
+    function start() {
+      stop();
+      if (!window.mpegts || !mpegts.isSupported()) { showMsg(false); showErr("This browser can't play video (no Media Source Extensions)."); return; }
+      showMsg(false); showErr("");
+      player = mpegts.createPlayer({ type: "mpegts", isLive: true, url: SRC, withCredentials: false },
+        { enableWorker: true, liveBufferLatencyChasing: true, liveBufferLatencyMaxLatency: 3.0, liveBufferLatencyMinRemain: 0.5, lazyLoad: false, autoCleanupSourceBuffer: true });
+      player.attachMediaElement(v);
+      player.on(mpegts.Events.ERROR, function () { showErr("reconnecting…"); scheduleReload(800); });
+      player.load();
+      v.play().catch(function () {});
     }
-    function makeTile(id) {
-      var tileEl = document.createElement("div"); tileEl.className = "tile";
-      var video = document.createElement("video"); video.autoplay = true; video.playsInline = true; video.muted = true;
-      var au = document.createElement("div"); au.className = "au"; au.textContent = "♪ SOUND";
-      var lbl = document.createElement("div"); lbl.className = "lbl";
-      tileEl.appendChild(video); tileEl.appendChild(au); tileEl.appendChild(lbl);
-      var e = players[id] = { video: video, player: null, tileEl: tileEl, lbl: lbl };
-      startMpegts(e, id, false);
-      return e;
-    }
-    function destroyTile(id) {
-      var e = players[id]; if (!e) return;
-      try { e.player && e.player.destroy(); } catch (x) {}
-      try { e.tileEl.remove(); } catch (x) {}
-      delete players[id];
+    // Debounced reload: the composite re-encodes (a brief discontinuity) whenever the
+    // app changes layout/focus/channels, so we re-grab a clean keyframe. Audio-tile
+    // swaps don't restart ffmpeg (instant zmq gain flip), so they need no reload.
+    function scheduleReload(delay) {
+      var when = Date.now() + (delay || 600);
+      if (reloadAt && reloadAt <= when) return;
+      reloadAt = when;
+      setTimeout(function () { reloadAt = 0; if (started && hasChannels) start(); }, delay || 600);
     }
 
-    function render(state) {
-      lastState = state;
-      var tiles = state.tiles || [], focus = state.focus, audio = state.audio || 0, layout = state.layout || "2x2";
-      if (!tiles.length) { msg.style.display = "flex"; for (var k in players) destroyTile(k); return; }
-      msg.style.display = "none";
-
-      var keep = {};
-      tiles.forEach(function (t) { keep[t.id] = 1; if (!players[t.id]) makeTile(t.id); });
-      for (var id in players) if (!keep[id]) destroyTile(id);
-
-      var focused = (focus != null && tiles[focus]) ? tiles[focus].id : null;
-      if (focused != null) { grid.style.gridTemplateColumns = "1fr"; grid.style.gridTemplateRows = "1fr"; }
-      else {
-        var cols = layout === "3x3" ? 3 : 2;
-        var rows = layout === "3x3" ? 3 : (layout === "2up" ? 1 : 2);
-        grid.style.gridTemplateColumns = "repeat(" + cols + ",1fr)";
-        grid.style.gridTemplateRows = "repeat(" + rows + ",1fr)";
-      }
-      tiles.forEach(function (t, i) {
-        var e = players[t.id]; if (!e) return;
-        if (e.tileEl.parentNode !== grid) grid.appendChild(e.tileEl);
-        e.tileEl.style.display = (focused == null || t.id === focused) ? "block" : "none";
-        var isAudio = i === audio;
-        e.video.muted = !isAudio || !started; // sound only after the start gesture
-        e.tileEl.className = "tile" + (isAudio ? " audio" : "");
-        e.lbl.textContent = (t.number != null ? "#" + t.number + "  " : "") + (t.name || "");
-      });
-    }
+    tap.addEventListener("click", function () {
+      started = true; tap.style.display = "none"; v.muted = false;
+      if (hasChannels) start(); else showMsg(true);
+    });
 
     function poll() {
       fetch("/mosaic/state?key=" + encodeURIComponent(KEY), { cache: "no-store" })
         .then(function (r) { return r.ok ? r.json() : null; })
-        .then(function (s) { if (!s) return; var sig = JSON.stringify(s); if (sig !== lastSig) { lastSig = sig; render(s); } })
+        .then(function (s) {
+          if (!s) return;
+          var tiles = s.tiles || [];
+          hasChannels = tiles.length > 0;
+          if (!hasChannels) { stop(); if (started) showMsg(true); return; }
+          // Restart only when the VIDEO layout changes (ffmpeg re-encodes); audio swaps are seamless.
+          var sig = JSON.stringify([tiles.map(function (t) { return t.id; }), s.layout, s.focus]);
+          if (started) {
+            if (!player) { start(); }
+            else if (sig !== vsig) { scheduleReload(300); }
+          }
+          vsig = sig;
+        })
         .catch(function () {});
     }
-
-    tap.addEventListener("click", function () {
-      started = true; tap.style.display = "none";
-      for (var id in players) { try { players[id].video.play().catch(function () {}); } catch (x) {} }
-      if (lastState) { lastSig = ""; render(lastState); } // re-apply mute now that we have a gesture
-    });
-
-    poll(); setInterval(poll, 1000);
+    poll(); setInterval(poll, 1500);
   })();
   </script>
 </body>
