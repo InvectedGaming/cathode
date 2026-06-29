@@ -61,8 +61,13 @@ function buildArgs(state: MosaicState): string[] | null {
   // on every input before it could render a single frame — that was the "freezing".
   // The preroll starts each input on a decodable keyframe, so the composite produces
   // output in ~1-2s at the cost of being ~1 GOP behind live (an acceptable trade).
+  // -reconnect: if a tile's feed transiently fails (e.g. the muxer has no free
+  // provider slot yet and returns 503), ffmpeg RETRIES that input instead of
+  // aborting the whole graph. Without this, one momentarily-unavailable channel
+  // kills the entire mosaic the instant it starts (the tile just stays black until
+  // its slot frees).
   const inputs: string[] = [];
-  for (const id of drawn) inputs.push("-fflags", "nobuffer+genpts", "-flags", "low_delay", "-avioflags", "direct", "-rw_timeout", "12000000", "-thread_queue_size", "512", "-analyzeduration", "1000000", "-probesize", "1000000", "-i", `http://127.0.0.1:${PORT}/mosaicfeed/${id}?key=${key}`);
+  for (const id of drawn) inputs.push("-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_on_http_error", "4xx,5xx", "-reconnect_delay_max", "6", "-fflags", "nobuffer+genpts", "-flags", "low_delay", "-avioflags", "direct", "-rw_timeout", "12000000", "-thread_queue_size", "512", "-analyzeduration", "1000000", "-probesize", "1000000", "-i", `http://127.0.0.1:${PORT}/mosaicfeed/${id}?key=${key}`);
 
   // [bg] black clock; each tile scaled+padded into its cell; chained overlays.
   let fc = `color=c=black:s=${W}x${H}:r=${FPS}[bg];`;
