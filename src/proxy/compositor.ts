@@ -56,11 +56,13 @@ function buildArgs(state: MosaicState): string[] | null {
   const rects = focused ? [{ x: 0, y: 0, w: W, h: H }] : cells(state.layout, drawn.length);
   const audioPos = focused ? 0 : Math.min(Math.max(0, state.audio | 0), drawn.length - 1);
 
-  // Feed each tile from /livefeed — the LIVE EDGE, with no keyframe preroll/backlog
-  // (that's only for instant channel-surf). So the composite tracks live (~1-2s)
-  // instead of starting a GOP behind. Low-latency input flags keep buffering tight.
+  // Feed each tile from /mosaicfeed — a KEYFRAME-ALIGNED feed (muxer preroll). With
+  // /livefeed (live edge, no keyframe) ffmpeg sat ~9s waiting for the next keyframe
+  // on every input before it could render a single frame — that was the "freezing".
+  // The preroll starts each input on a decodable keyframe, so the composite produces
+  // output in ~1-2s at the cost of being ~1 GOP behind live (an acceptable trade).
   const inputs: string[] = [];
-  for (const id of drawn) inputs.push("-fflags", "nobuffer+genpts", "-flags", "low_delay", "-avioflags", "direct", "-rw_timeout", "12000000", "-thread_queue_size", "512", "-analyzeduration", "1000000", "-probesize", "1000000", "-i", `http://127.0.0.1:${PORT}/livefeed/${id}?key=${key}`);
+  for (const id of drawn) inputs.push("-fflags", "nobuffer+genpts", "-flags", "low_delay", "-avioflags", "direct", "-rw_timeout", "12000000", "-thread_queue_size", "512", "-analyzeduration", "1000000", "-probesize", "1000000", "-i", `http://127.0.0.1:${PORT}/mosaicfeed/${id}?key=${key}`);
 
   // [bg] black clock; each tile scaled+padded into its cell; chained overlays.
   let fc = `color=c=black:s=${W}x${H}:r=${FPS}[bg];`;
